@@ -1,0 +1,23 @@
+# Corpus — large, read-only, not version-controlled (see AGENTS.md)
+/dataset/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.whl
+
+# venv
+.venv/
+venv/
+env/
+
+# Editors / OS
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
