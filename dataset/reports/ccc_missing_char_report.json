@@ -1,0 +1,1622 @@
+{
+  "ccc": {
+    "total_chars": 147406752,
+    "unique_chars": 16942
+  },
+  "daizhige": {
+    "total_chars": 1807620280,
+    "unique_chars": 26562
+  },
+  "chars_in_daizhige_missing_from_ccc": {
+    "count": 10312,
+    "top_200": [
+      {
+        "char": ".",
+        "freq": 16490
+      },
+      {
+        "char": "8",
+        "freq": 16369
+      },
+      {
+        "char": "T",
+        "freq": 16225
+      },
+      {
+        "char": "K",
+        "freq": 16078
+      },
+      {
+        "char": "o",
+        "freq": 16011
+      },
+      {
+        "char": "l",
+        "freq": 15938
+      },
+      {
+        "char": "t",
+        "freq": 15916
+      },
+      {
+        "char": "i",
+        "freq": 15915
+      },
+      {
+        "char": "a",
+        "freq": 15913
+      },
+      {
+        "char": "n",
+        "freq": 15898
+      },
+      {
+        "char": "r",
+        "freq": 15864
+      },
+      {
+        "char": "p",
+        "freq": 15858
+      },
+      {
+        "char": "e",
+        "freq": 15851
+      },
+      {
+        "char": "c",
+        "freq": 15850
+      },
+      {
+        "char": "s",
+        "freq": 15847
+      },
+      {
+        "char": "h",
+        "freq": 15845
+      },
+      {
+        "char": "m",
+        "freq": 15842
+      },
+      {
+        "char": "b",
+        "freq": 15833
+      },
+      {
+        "char": "k",
+        "freq": 15812
+      },
+      {
+        "char": "O",
+        "freq": 15802
+      },
+      {
+        "char": "S",
+        "freq": 15801
+      },
+      {
+        "char": "f",
+        "freq": 15801
+      },
+      {
+        "char": "y",
+        "freq": 15787
+      },
+      {
+        "char": "M",
+        "freq": 15782
+      },
+      {
+        "char": "X",
+        "freq": 15782
+      },
+      {
+        "char": "q",
+        "freq": 15776
+      },
+      {
+        "char": "v",
+        "freq": 15772
+      },
+      {
+        "char": "R",
+        "freq": 15760
+      },
+      {
+        "char": "\u0016",
+        "freq": 15697
+      },
+      {
+        "char": "�",
+        "freq": 15696
+      },
+      {
+        "char": "\u0001",
+        "freq": 15696
+      },
+      {
+        "char": "\u0003",
+        "freq": 15696
+      },
+      {
+        "char": "\u0015",
+        "freq": 15695
+      },
+      {
+        "char": "\b",
+        "freq": 15695
+      },
+      {
+        "char": "\u001e",
+        "freq": 15695
+      },
+      {
+        "char": "\u001c",
+        "freq": 15695
+      },
+      {
+        "char": "\u0002",
+        "freq": 15695
+      },
+      {
+        "char": "\u0004",
+        "freq": 15695
+      },
+      {
+        "char": "\u0005",
+        "freq": 15695
+      },
+      {
+        "char": "\u0007",
+        "freq": 15694
+      },
+      {
+        "char": "\u0000",
+        "freq": 15694
+      },
+      {
+        "char": "\u000b",
+        "freq": 15694
+      },
+      {
+        "char": "\u000e",
+        "freq": 15694
+      },
+      {
+        "char": "d",
+        "freq": 1817
+      },
+      {
+        "char": "穏",
+        "freq": 1124
+      },
+      {
+        "char": "—",
+        "freq": 1018
+      },
+      {
+        "char": "笻",
+        "freq": 960
+      },
+      {
+        "char": "嚩",
+        "freq": 941
+      },
+      {
+        "char": "…",
+        "freq": 862
+      },
+      {
+        "char": "竚",
+        "freq": 861
+      },
+      {
+        "char": "濓",
+        "freq": 830
+      },
+      {
+        "char": "酡",
+        "freq": 805
+      },
+      {
+        "char": "卄",
+        "freq": 743
+      },
+      {
+        "char": "悞",
+        "freq": 730
+      },
+      {
+        "char": "疳",
+        "freq": 687
+      },
+      {
+        "char": "閦",
+        "freq": 617
+      },
+      {
+        "char": "灔",
+        "freq": 617
+      },
+      {
+        "char": "瓈",
+        "freq": 570
+      },
+      {
+        "char": "渧",
+        "freq": 558
+      },
+      {
+        "char": "莂",
+        "freq": 539
+      },
+      {
+        "char": "鶱",
+        "freq": 534
+      },
+      {
+        "char": "戽",
+        "freq": 530
+      },
+      {
+        "char": "顸",
+        "freq": 528
+      },
+      {
+        "char": "綉",
+        "freq": 526
+      },
+      {
+        "char": "",
+        "freq": 479
+      },
+      {
+        "char": "茒",
+        "freq": 471
+      },
+      {
+        "char": "窽",
+        "freq": 467
+      },
+      {
+        "char": "颟",
+        "freq": 462
+      },
+      {
+        "char": "摵",
+        "freq": 462
+      },
+      {
+        "char": "揑",
+        "freq": 461
+      },
+      {
+        "char": "嚧",
+        "freq": 444
+      },
+      {
+        "char": "饾",
+        "freq": 437
+      },
+      {
+        "char": "覼",
+        "freq": 431
+      },
+      {
+        "char": "抺",
+        "freq": 431
+      },
+      {
+        "char": "嫜",
+        "freq": 428
+      },
+      {
+        "char": "齁",
+        "freq": 423
+      },
+      {
+        "char": "茰",
+        "freq": 422
+      },
+      {
+        "char": "擡",
+        "freq": 420
+      },
+      {
+        "char": "楖",
+        "freq": 408
+      },
+      {
+        "char": "飇",
+        "freq": 405
+      },
+      {
+        "char": "蟭",
+        "freq": 401
+      },
+      {
+        "char": "嚫",
+        "freq": 400
+      },
+      {
+        "char": "痌",
+        "freq": 396
+      },
+      {
+        "char": "卍",
+        "freq": 394
+      },
+      {
+        "char": "垧",
+        "freq": 390
+      },
+      {
+        "char": "聻",
+        "freq": 389
+      },
+      {
+        "char": "",
+        "freq": 388
+      },
+      {
+        "char": "",
+        "freq": 385
+      },
+      {
+        "char": "H",
+        "freq": 380
+      },
+      {
+        "char": "凈",
+        "freq": 376
+      },
+      {
+        "char": "獞",
+        "freq": 364
+      },
+      {
+        "char": "儞",
+        "freq": 360
+      },
+      {
+        "char": "蓞",
+        "freq": 359
+      },
+      {
+        "char": "箆",
+        "freq": 356
+      },
+      {
+        "char": "儱",
+        "freq": 354
+      },
+      {
+        "char": "碪",
+        "freq": 354
+      },
+      {
+        "char": "吚",
+        "freq": 351
+      },
+      {
+        "char": "姸",
+        "freq": 351
+      },
+      {
+        "char": "藴",
+        "freq": 349
+      },
+      {
+        "char": "霔",
+        "freq": 344
+      },
+      {
+        "char": "",
+        "freq": 337
+      },
+      {
+        "char": "哢",
+        "freq": 330
+      },
+      {
+        "char": "１",
+        "freq": 323
+      },
+      {
+        "char": "寧",
+        "freq": 319
+      },
+      {
+        "char": "龎",
+        "freq": 315
+      },
+      {
+        "char": "簔",
+        "freq": 313
+      },
+      {
+        "char": "",
+        "freq": 311
+      },
+      {
+        "char": "癈",
+        "freq": 307
+      },
+      {
+        "char": "弆",
+        "freq": 306
+      },
+      {
+        "char": "摝",
+        "freq": 298
+      },
+      {
+        "char": "笕",
+        "freq": 295
+      },
+      {
+        "char": "囦",
+        "freq": 286
+      },
+      {
+        "char": "匼",
+        "freq": 283
+      },
+      {
+        "char": "靉",
+        "freq": 279
+      },
+      {
+        "char": "懡",
+        "freq": 277
+      },
+      {
+        "char": "抂",
+        "freq": 271
+      },
+      {
+        "char": "ㄙ",
+        "freq": 257
+      },
+      {
+        "char": "鱻",
+        "freq": 255
+      },
+      {
+        "char": "岝",
+        "freq": 254
+      },
+      {
+        "char": "",
+        "freq": 254
+      },
+      {
+        "char": "鹒",
+        "freq": 253
+      },
+      {
+        "char": "菂",
+        "freq": 253
+      },
+      {
+        "char": "枤",
+        "freq": 253
+      },
+      {
+        "char": "鱍",
+        "freq": 252
+      },
+      {
+        "char": "醭",
+        "freq": 249
+      },
+      {
+        "char": "髼",
+        "freq": 248
+      },
+      {
+        "char": "毸",
+        "freq": 247
+      },
+      {
+        "char": "屴",
+        "freq": 247
+      },
+      {
+        "char": "悷",
+        "freq": 244
+      },
+      {
+        "char": "縧",
+        "freq": 244
+      },
+      {
+        "char": "",
+        "freq": 242
+      },
+      {
+        "char": "襶",
+        "freq": 241
+      },
+      {
+        "char": "忺",
+        "freq": 241
+      },
+      {
+        "char": "褦",
+        "freq": 239
+      },
+      {
+        "char": "艣",
+        "freq": 239
+      },
+      {
+        "char": "",
+        "freq": 237
+      },
+      {
+        "char": "竆",
+        "freq": 236
+      },
+      {
+        "char": "哷",
+        "freq": 233
+      },
+      {
+        "char": "",
+        "freq": 230
+      },
+      {
+        "char": "",
+        "freq": 229
+      },
+      {
+        "char": "毺",
+        "freq": 228
+      },
+      {
+        "char": "▆",
+        "freq": 227
+      },
+      {
+        "char": "篐",
+        "freq": 226
+      },
+      {
+        "char": "黤",
+        "freq": 225
+      },
+      {
+        "char": "",
+        "freq": 224
+      },
+      {
+        "char": "",
+        "freq": 224
+      },
+      {
+        "char": "窎",
+        "freq": 223
+      },
+      {
+        "char": "鲡",
+        "freq": 223
+      },
+      {
+        "char": "竮",
+        "freq": 222
+      },
+      {
+        "char": "棙",
+        "freq": 222
+      },
+      {
+        "char": "墖",
+        "freq": 218
+      },
+      {
+        "char": "",
+        "freq": 217
+      },
+      {
+        "char": "",
+        "freq": 216
+      },
+      {
+        "char": "篔",
+        "freq": 215
+      },
+      {
+        "char": "躱",
+        "freq": 215
+      },
+      {
+        "char": "嗈",
+        "freq": 213
+      },
+      {
+        "char": "嫰",
+        "freq": 211
+      },
+      {
+        "char": "儓",
+        "freq": 210
+      },
+      {
+        "char": "臙",
+        "freq": 208
+      },
+      {
+        "char": "澷",
+        "freq": 208
+      },
+      {
+        "char": "",
+        "freq": 208
+      },
+      {
+        "char": "鶢",
+        "freq": 207
+      },
+      {
+        "char": "囕",
+        "freq": 204
+      },
+      {
+        "char": "欱",
+        "freq": 204
+      },
+      {
+        "char": "寱",
+        "freq": 203
+      },
+      {
+        "char": "",
+        "freq": 202
+      },
+      {
+        "char": "",
+        "freq": 202
+      },
+      {
+        "char": "",
+        "freq": 202
+      },
+      {
+        "char": "牐",
+        "freq": 202
+      },
+      {
+        "char": "鞳",
+        "freq": 201
+      },
+      {
+        "char": "臌",
+        "freq": 200
+      },
+      {
+        "char": "",
+        "freq": 199
+      },
+      {
+        "char": "浤",
+        "freq": 198
+      },
+      {
+        "char": "",
+        "freq": 198
+      },
+      {
+        "char": "掁",
+        "freq": 196
+      },
+      {
+        "char": "嵽",
+        "freq": 196
+      },
+      {
+        "char": "",
+        "freq": 196
+      },
+      {
+        "char": "沜",
+        "freq": 195
+      },
+      {
+        "char": "",
+        "freq": 195
+      },
+      {
+        "char": "竛",
+        "freq": 194
+      },
+      {
+        "char": "",
+        "freq": 194
+      },
+      {
+        "char": "媍",
+        "freq": 192
+      },
+      {
+        "char": "蔲",
+        "freq": 191
+      },
+      {
+        "char": "韛",
+        "freq": 190
+      },
+      {
+        "char": "",
+        "freq": 190
+      },
+      {
+        "char": "奯",
+        "freq": 188
+      },
+      {
+        "char": "醥",
+        "freq": 188
+      },
+      {
+        "char": "狉",
+        "freq": 187
+      },
+      {
+        "char": "",
+        "freq": 187
+      },
+      {
+        "char": "",
+        "freq": 186
+      },
+      {
+        "char": "僽",
+        "freq": 185
+      },
+      {
+        "char": "",
+        "freq": 185
+      },
+      {
+        "char": "礶",
+        "freq": 185
+      },
+      {
+        "char": "",
+        "freq": 184
+      },
+      {
+        "char": "寉",
+        "freq": 184
+      },
+      {
+        "char": "槵",
+        "freq": 183
+      },
+      {
+        "char": "煠",
+        "freq": 183
+      },
+      {
+        "char": "",
+        "freq": 183
+      },
+      {
+        "char": "匶",
+        "freq": 183
+      },
+      {
+        "char": "",
+        "freq": 183
+      }
+    ]
+  },
+  "chars_in_ccc_missing_from_daizhige": {
+    "count": 692,
+    "top_200": [
+      {
+        "char": "𠡠",
+        "freq": 2489
+      },
+      {
+        "char": "𫖮",
+        "freq": 1424
+      },
+      {
+        "char": "𬀩",
+        "freq": 804
+      },
+      {
+        "char": "𬱟",
+        "freq": 589
+      },
+      {
+        "char": "䃅",
+        "freq": 541
+      },
+      {
+        "char": "𬴊",
+        "freq": 513
+      },
+      {
+        "char": "䜩",
+        "freq": 420
+      },
+      {
+        "char": "䜣",
+        "freq": 416
+      },
+      {
+        "char": "𫷷",
+        "freq": 372
+      },
+      {
+        "char": "𤩽",
+        "freq": 310
+      },
+      {
+        "char": "𬘭",
+        "freq": 276
+      },
+      {
+        "char": "𪻺",
+        "freq": 214
+      },
+      {
+        "char": "𬘘",
+        "freq": 208
+      },
+      {
+        "char": "𪟝",
+        "freq": 201
+      },
+      {
+        "char": "𫄸",
+        "freq": 195
+      },
+      {
+        "char": "𣰋",
+        "freq": 159
+      },
+      {
+        "char": "𫕥",
+        "freq": 145
+      },
+      {
+        "char": "㝢",
+        "freq": 142
+      },
+      {
+        "char": "𫐌",
+        "freq": 135
+      },
+      {
+        "char": "𫓧",
+        "freq": 123
+      },
+      {
+        "char": "𫠆",
+        "freq": 111
+      },
+      {
+        "char": "𬴂",
+        "freq": 111
+      },
+      {
+        "char": "𤅢",
+        "freq": 105
+      },
+      {
+        "char": "𪸩",
+        "freq": 99
+      },
+      {
+        "char": "㥪",
+        "freq": 98
+      },
+      {
+        "char": "𫄫",
+        "freq": 90
+      },
+      {
+        "char": "𫖳",
+        "freq": 84
+      },
+      {
+        "char": "𬬻",
+        "freq": 75
+      },
+      {
+        "char": "𫏐",
+        "freq": 72
+      },
+      {
+        "char": "𬨎",
+        "freq": 72
+      },
+      {
+        "char": "𫍯",
+        "freq": 72
+      },
+      {
+        "char": "𫄠",
+        "freq": 70
+      },
+      {
+        "char": "𪨗",
+        "freq": 69
+      },
+      {
+        "char": "𫮃",
+        "freq": 69
+      },
+      {
+        "char": "",
+        "freq": 69
+      },
+      {
+        "char": "𫄨",
+        "freq": 66
+      },
+      {
+        "char": "𫗴",
+        "freq": 64
+      },
+      {
+        "char": "㻬",
+        "freq": 64
+      },
+      {
+        "char": "𫄶",
+        "freq": 61
+      },
+      {
+        "char": "𬯎",
+        "freq": 57
+      },
+      {
+        "char": "𦶟",
+        "freq": 57
+      },
+      {
+        "char": "𫜁",
+        "freq": 57
+      },
+      {
+        "char": "𢶏",
+        "freq": 57
+      },
+      {
+        "char": "䌷",
+        "freq": 54
+      },
+      {
+        "char": "㚟",
+        "freq": 53
+      },
+      {
+        "char": "𬤇",
+        "freq": 51
+      },
+      {
+        "char": "𫄥",
+        "freq": 48
+      },
+      {
+        "char": "𫍲",
+        "freq": 48
+      },
+      {
+        "char": "𠴲",
+        "freq": 47
+      },
+      {
+        "char": "𫄧",
+        "freq": 45
+      },
+      {
+        "char": "䯄",
+        "freq": 45
+      },
+      {
+        "char": "𬣙",
+        "freq": 45
+      },
+      {
+        "char": "𫗧",
+        "freq": 42
+      },
+      {
+        "char": "𬳿",
+        "freq": 42
+      },
+      {
+        "char": "𫗪",
+        "freq": 42
+      },
+      {
+        "char": "𥩟",
+        "freq": 42
+      },
+      {
+        "char": "𫘦",
+        "freq": 39
+      },
+      {
+        "char": "𫐉",
+        "freq": 39
+      },
+      {
+        "char": "𬭚",
+        "freq": 39
+      },
+      {
+        "char": "㲄",
+        "freq": 39
+      },
+      {
+        "char": "㻅",
+        "freq": 39
+      },
+      {
+        "char": "㭎",
+        "freq": 38
+      },
+      {
+        "char": "䂮",
+        "freq": 37
+      },
+      {
+        "char": "𣸣",
+        "freq": 36
+      },
+      {
+        "char": "䐃",
+        "freq": 36
+      },
+      {
+        "char": "䐜",
+        "freq": 36
+      },
+      {
+        "char": "䀮",
+        "freq": 36
+      },
+      {
+        "char": "𢙏",
+        "freq": 33
+      },
+      {
+        "char": "𪩘",
+        "freq": 33
+      },
+      {
+        "char": "𫘤",
+        "freq": 33
+      },
+      {
+        "char": "㥄",
+        "freq": 33
+      },
+      {
+        "char": "𫗦",
+        "freq": 33
+      },
+      {
+        "char": "𣝛",
+        "freq": 33
+      },
+      {
+        "char": "𬇙",
+        "freq": 30
+      },
+      {
+        "char": "䥽",
+        "freq": 30
+      },
+      {
+        "char": "𫖇",
+        "freq": 30
+      },
+      {
+        "char": "𡙇",
+        "freq": 30
+      },
+      {
+        "char": "𣅳",
+        "freq": 30
+      },
+      {
+        "char": "𨰿",
+        "freq": 30
+      },
+      {
+        "char": "",
+        "freq": 30
+      },
+      {
+        "char": "㸲",
+        "freq": 30
+      },
+      {
+        "char": "𫏋",
+        "freq": 29
+      },
+      {
+        "char": "𬙊",
+        "freq": 28
+      },
+      {
+        "char": "𫘧",
+        "freq": 27
+      },
+      {
+        "char": "𰬸",
+        "freq": 27
+      },
+      {
+        "char": "㿉",
+        "freq": 26
+      },
+      {
+        "char": "㐌",
+        "freq": 25
+      },
+      {
+        "char": "𫈵",
+        "freq": 24
+      },
+      {
+        "char": "䌸",
+        "freq": 24
+      },
+      {
+        "char": "𢙓",
+        "freq": 24
+      },
+      {
+        "char": "",
+        "freq": 24
+      },
+      {
+        "char": "𪎊",
+        "freq": 24
+      },
+      {
+        "char": "䝙",
+        "freq": 24
+      },
+      {
+        "char": "𫖒",
+        "freq": 24
+      },
+      {
+        "char": "𫛱",
+        "freq": 24
+      },
+      {
+        "char": "䏰",
+        "freq": 23
+      },
+      {
+        "char": "𤣱",
+        "freq": 22
+      },
+      {
+        "char": "𬸦",
+        "freq": 21
+      },
+      {
+        "char": "䇲",
+        "freq": 21
+      },
+      {
+        "char": "㝵",
+        "freq": 21
+      },
+      {
+        "char": "𦈌",
+        "freq": 21
+      },
+      {
+        "char": "𬯀",
+        "freq": 21
+      },
+      {
+        "char": "𨵦",
+        "freq": 21
+      },
+      {
+        "char": "",
+        "freq": 20
+      },
+      {
+        "char": "㬓",
+        "freq": 20
+      },
+      {
+        "char": "𩩲",
+        "freq": 20
+      },
+      {
+        "char": "𫗵",
+        "freq": 18
+      },
+      {
+        "char": "𪣻",
+        "freq": 18
+      },
+      {
+        "char": "䑽",
+        "freq": 18
+      },
+      {
+        "char": "𫍬",
+        "freq": 18
+      },
+      {
+        "char": "𫛳",
+        "freq": 18
+      },
+      {
+        "char": "𪾢",
+        "freq": 18
+      },
+      {
+        "char": "𫐘",
+        "freq": 18
+      },
+      {
+        "char": "𫘝",
+        "freq": 18
+      },
+      {
+        "char": "",
+        "freq": 18
+      },
+      {
+        "char": "𧵍",
+        "freq": 18
+      },
+      {
+        "char": "𫔔",
+        "freq": 18
+      },
+      {
+        "char": "𫑡",
+        "freq": 18
+      },
+      {
+        "char": "𫍢",
+        "freq": 18
+      },
+      {
+        "char": "𫭟",
+        "freq": 18
+      },
+      {
+        "char": "𨱇",
+        "freq": 18
+      },
+      {
+        "char": "",
+        "freq": 18
+      },
+      {
+        "char": "",
+        "freq": 18
+      },
+      {
+        "char": "㡊",
+        "freq": 18
+      },
+      {
+        "char": "㹠",
+        "freq": 17
+      },
+      {
+        "char": "䅺",
+        "freq": 16
+      },
+      {
+        "char": "䏚",
+        "freq": 16
+      },
+      {
+        "char": "䐖",
+        "freq": 15
+      },
+      {
+        "char": "䓨",
+        "freq": 15
+      },
+      {
+        "char": "𬶍",
+        "freq": 15
+      },
+      {
+        "char": "𫎩",
+        "freq": 15
+      },
+      {
+        "char": "𪴙",
+        "freq": 15
+      },
+      {
+        "char": "𫇭",
+        "freq": 15
+      },
+      {
+        "char": "𬮱",
+        "freq": 15
+      },
+      {
+        "char": "𡑞",
+        "freq": 15
+      },
+      {
+        "char": "𤞤",
+        "freq": 15
+      },
+      {
+        "char": "𫖯",
+        "freq": 15
+      },
+      {
+        "char": "",
+        "freq": 15
+      },
+      {
+        "char": "",
+        "freq": 15
+      },
+      {
+        "char": "𩎟",
+        "freq": 15
+      },
+      {
+        "char": "",
+        "freq": 15
+      },
+      {
+        "char": "",
+        "freq": 15
+      },
+      {
+        "char": "",
+        "freq": 15
+      },
+      {
+        "char": "",
+        "freq": 15
+      },
+      {
+        "char": "",
+        "freq": 15
+      },
+      {
+        "char": "㿗",
+        "freq": 14
+      },
+      {
+        "char": "𦋺",
+        "freq": 12
+      },
+      {
+        "char": "𨱎",
+        "freq": 12
+      },
+      {
+        "char": "𫓾",
+        "freq": 12
+      },
+      {
+        "char": "𪭢",
+        "freq": 12
+      },
+      {
+        "char": "𠌤",
+        "freq": 12
+      },
+      {
+        "char": "𧦴",
+        "freq": 12
+      },
+      {
+        "char": "𫐐",
+        "freq": 12
+      },
+      {
+        "char": "",
+        "freq": 12
+      },
+      {
+        "char": "䓕",
+        "freq": 12
+      },
+      {
+        "char": "䴏",
+        "freq": 12
+      },
+      {
+        "char": "㬺",
+        "freq": 12
+      },
+      {
+        "char": "𫄬",
+        "freq": 12
+      },
+      {
+        "char": "",
+        "freq": 12
+      },
+      {
+        "char": "",
+        "freq": 12
+      },
+      {
+        "char": "",
+        "freq": 12
+      },
+      {
+        "char": "",
+        "freq": 12
+      },
+      {
+        "char": "",
+        "freq": 12
+      },
+      {
+        "char": "𫐈",
+        "freq": 12
+      },
+      {
+        "char": "",
+        "freq": 12
+      },
+      {
+        "char": "䵍",
+        "freq": 12
+      },
+      {
+        "char": "𧈫",
+        "freq": 12
+      },
+      {
+        "char": "㑊",
+        "freq": 12
+      },
+      {
+        "char": "𫛪",
+        "freq": 10
+      },
+      {
+        "char": "㟭",
+        "freq": 10
+      },
+      {
+        "char": "䃌",
+        "freq": 10
+      },
+      {
+        "char": "䲹",
+        "freq": 10
+      },
+      {
+        "char": "䏿",
+        "freq": 10
+      },
+      {
+        "char": "䳐",
+        "freq": 10
+      },
+      {
+        "char": "䪼",
+        "freq": 10
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "𬤝",
+        "freq": 9
+      },
+      {
+        "char": "𭺩",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "𫜬",
+        "freq": 9
+      },
+      {
+        "char": "㲪",
+        "freq": 9
+      },
+      {
+        "char": "𡵒",
+        "freq": 9
+      },
+      {
+        "char": "𫐕",
+        "freq": 9
+      },
+      {
+        "char": "䴵",
+        "freq": 9
+      },
+      {
+        "char": "𪩸",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "",
+        "freq": 9
+      },
+      {
+        "char": "𠋆",
+        "freq": 9
+      },
+      {
+        "char": "𫓴",
+        "freq": 9
+      },
+      {
+        "char": "𪸕",
+        "freq": 9
+      },
+      {
+        "char": "𧫷",
+        "freq": 9
+      },
+      {
+        "char": "𡒄",
+        "freq": 9
+      },
+      {
+        "char": "𫚌",
+        "freq": 9
+      },
+      {
+        "char": "𬸚",
+        "freq": 9
+      }
+    ]
+  },
+  "union_unique_chars": 27254,
+  "note": "daizhige char frequencies are approximations (counted once per chunk of unique chars); CCC frequencies are exact."
+}

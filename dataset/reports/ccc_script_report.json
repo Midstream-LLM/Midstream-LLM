@@ -1,0 +1,50 @@
+{
+  "overall": {
+    "simplified": 1863304,
+    "mixed": 101134,
+    "identical": 18247,
+    "traditional": 248
+  },
+  "files": {
+    "corpus.jsonl": {
+      "counts": {
+        "simplified": 1364,
+        "mixed": 10601,
+        "identical": 6,
+        "traditional": 38
+      },
+      "example_ids": {
+        "simplified": "beiqishu#1",
+        "mixed": "beiqishu#4",
+        "identical": "shuowen#9",
+        "traditional": "shuowen#11"
+      }
+    },
+    "translate.jsonl": {
+      "counts": {
+        "simplified": 1819416,
+        "mixed": 86516,
+        "identical": 18236,
+        "traditional": 210
+      },
+      "example_ids": {
+        "simplified": "instruct#1",
+        "mixed": "instruct#73",
+        "identical": "instruct#489",
+        "traditional": "instruct#50723"
+      }
+    },
+    "punctuate.jsonl": {
+      "counts": {
+        "simplified": 42524,
+        "mixed": 4017,
+        "identical": 5
+      },
+      "example_ids": {
+        "simplified": "punct#1",
+        "mixed": "punct#76",
+        "identical": "punct#9050"
+      }
+    }
+  }
+}

@@ -1,5 +1,8 @@
 # Corpus — large, read-only, not version-controlled (see AGENTS.md)
-/dataset/
+/dataset/normalized/
+/dataset/processed/
+/dataset/raw/
+/dataset/manifests/
 
 # Python
 __pycache__/
@@ -21,3 +24,6 @@ env/
 .idea/
 .vscode/
 *.swp
+
+# Zip files
+*.zip

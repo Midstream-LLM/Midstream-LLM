@@ -1,0 +1,510 @@
+{
+  "source_files": [
+    "corpus.jsonl",
+    "translate.jsonl",
+    "punctuate.jsonl"
+  ],
+  "total_chars_ccc": 147406752,
+  "files": {
+    "corpus.jsonl": {
+      "record_count": 12009,
+      "json_errors": 0,
+      "unique_ids": 12009,
+      "duplicate_ids": 0,
+      "duplicate_id_examples": [],
+      "fields": {
+        "id": {
+          "present": 12009,
+          "empty": 0,
+          "types": {
+            "str": 12009
+          },
+          "total_chars": 140433,
+          "min_chars": 6,
+          "max_chars": 18,
+          "mean_chars": 11.7,
+          "p50": 12,
+          "p90": 12,
+          "p99": 18
+        },
+        "source": {
+          "present": 12009,
+          "empty": 0,
+          "types": {
+            "str": 12009
+          },
+          "total_chars": 44667,
+          "min_chars": 2,
+          "max_chars": 5,
+          "mean_chars": 3.7,
+          "p50": 4,
+          "p90": 4,
+          "p99": 4
+        },
+        "author": {
+          "present": 12009,
+          "empty": 0,
+          "types": {
+            "str": 12009
+          },
+          "total_chars": 28345,
+          "min_chars": 2,
+          "max_chars": 9,
+          "mean_chars": 2.4,
+          "p50": 2,
+          "p90": 3,
+          "p99": 9
+        },
+        "era": {
+          "present": 12009,
+          "empty": 0,
+          "types": {
+            "str": 12009
+          },
+          "total_chars": 12807,
+          "min_chars": 1,
+          "max_chars": 3,
+          "mean_chars": 1.1,
+          "p50": 1,
+          "p90": 1,
+          "p99": 3
+        },
+        "category": {
+          "present": 12009,
+          "empty": 0,
+          "types": {
+            "str": 12009
+          },
+          "total_chars": 21840,
+          "min_chars": 1,
+          "max_chars": 2,
+          "mean_chars": 1.8,
+          "p50": 2,
+          "p90": 2,
+          "p99": 2
+        },
+        "volume": {
+          "present": 1591,
+          "empty": 0,
+          "types": {
+            "int": 1591
+          },
+          "total_chars": 0
+        },
+        "volume_suffix": {
+          "present": 822,
+          "empty": 796,
+          "types": {
+            "str": 822
+          },
+          "total_chars": 34,
+          "min_chars": 1,
+          "max_chars": 2,
+          "mean_chars": 1.3,
+          "p50": 1,
+          "p90": 2,
+          "p99": 2
+        },
+        "chapter": {
+          "present": 1884,
+          "empty": 0,
+          "types": {
+            "str": 1884
+          },
+          "total_chars": 18401,
+          "min_chars": 2,
+          "max_chars": 60,
+          "mean_chars": 9.8,
+          "p50": 10,
+          "p90": 17,
+          "p99": 28
+        },
+        "content": {
+          "present": 12009,
+          "empty": 0,
+          "types": {
+            "str": 12009
+          },
+          "total_chars": 17243387,
+          "min_chars": 2,
+          "max_chars": 127913,
+          "mean_chars": 1435.9,
+          "p50": 13,
+          "p90": 6130,
+          "p99": 18015
+        },
+        "_source": {
+          "present": 822,
+          "empty": 0,
+          "types": {
+            "str": 822
+          },
+          "total_chars": 10102,
+          "min_chars": 10,
+          "max_chars": 25,
+          "mean_chars": 12.3,
+          "p50": 11,
+          "p90": 11,
+          "p99": 25
+        },
+        "section": {
+          "present": 667,
+          "empty": 0,
+          "types": {
+            "str": 80,
+            "int": 587
+          },
+          "total_chars": 160,
+          "min_chars": 2,
+          "max_chars": 2,
+          "mean_chars": 2.0,
+          "p50": 2,
+          "p90": 2,
+          "p99": 2
+        },
+        "char": {
+          "present": 9831,
+          "empty": 2,
+          "types": {
+            "str": 9831
+          },
+          "total_chars": 9829,
+          "min_chars": 1,
+          "max_chars": 1,
+          "mean_chars": 1.0,
+          "p50": 1,
+          "p90": 1,
+          "p99": 1
+        },
+        "radical": {
+          "present": 9831,
+          "empty": 0,
+          "types": {
+            "str": 9831
+          },
+          "total_chars": 19661,
+          "min_chars": 1,
+          "max_chars": 2,
+          "mean_chars": 2.0,
+          "p50": 2,
+          "p90": 2,
+          "p99": 2
+        },
+        "pinyin": {
+          "present": 9831,
+          "empty": 2,
+          "types": {
+            "str": 9831
+          },
+          "total_chars": 49107,
+          "min_chars": 2,
+          "max_chars": 23,
+          "mean_chars": 5.0,
+          "p50": 4,
+          "p90": 9,
+          "p99": 13
+        },
+        "fanqie": {
+          "present": 9831,
+          "empty": 9,
+          "types": {
+            "str": 9831
+          },
+          "total_chars": 29984,
+          "min_chars": 3,
+          "max_chars": 11,
+          "mean_chars": 3.1,
+          "p50": 3,
+          "p90": 3,
+          "p99": 8
+        },
+        "_filled_from": {
+          "present": 6,
+          "empty": 0,
+          "types": {
+            "str": 6
+          },
+          "total_chars": 68,
+          "min_chars": 9,
+          "max_chars": 16,
+          "mean_chars": 11.3,
+          "p50": 9,
+          "p90": 16,
+          "p99": 16
+        },
+        "subchapter": {
+          "present": 305,
+          "empty": 0,
+          "types": {
+            "str": 305
+          },
+          "total_chars": 932,
+          "min_chars": 2,
+          "max_chars": 6,
+          "mean_chars": 3.1,
+          "p50": 2,
+          "p90": 4,
+          "p99": 6
+        },
+        "title": {
+          "present": 305,
+          "empty": 0,
+          "types": {
+            "str": 305
+          },
+          "total_chars": 700,
+          "min_chars": 1,
+          "max_chars": 5,
+          "mean_chars": 2.3,
+          "p50": 2,
+          "p90": 4,
+          "p99": 4
+        },
+        "period": {
+          "present": 294,
+          "empty": 30,
+          "types": {
+            "str": 294
+          },
+          "total_chars": 1070,
+          "min_chars": 3,
+          "max_chars": 5,
+          "mean_chars": 4.1,
+          "p50": 4,
+          "p90": 5,
+          "p99": 5
+        }
+      }
+    },
+    "translate.jsonl": {
+      "record_count": 1924378,
+      "json_errors": 0,
+      "unique_ids": 1924378,
+      "duplicate_ids": 0,
+      "duplicate_id_examples": [],
+      "fields": {
+        "id": {
+          "present": 1924378,
+          "empty": 0,
+          "types": {
+            "str": 1924378
+          },
+          "total_chars": 29678944,
+          "min_chars": 10,
+          "max_chars": 16,
+          "mean_chars": 15.4,
+          "p50": 15,
+          "p90": 16,
+          "p99": 16
+        },
+        "task": {
+          "present": 1924378,
+          "empty": 0,
+          "types": {
+            "str": 1924378
+          },
+          "total_chars": 5773134,
+          "min_chars": 3,
+          "max_chars": 3,
+          "mean_chars": 3.0,
+          "p50": 3,
+          "p90": 3,
+          "p99": 3
+        },
+        "instruction": {
+          "present": 1924378,
+          "empty": 0,
+          "types": {
+            "str": 1924378
+          },
+          "total_chars": 19650406,
+          "min_chars": 3,
+          "max_chars": 13,
+          "mean_chars": 10.2,
+          "p50": 11,
+          "p90": 13,
+          "p99": 13
+        },
+        "input": {
+          "present": 1924378,
+          "empty": 0,
+          "types": {
+            "str": 1924378
+          },
+          "total_chars": 54203940,
+          "min_chars": 4,
+          "max_chars": 491,
+          "mean_chars": 28.2,
+          "p50": 23,
+          "p90": 52,
+          "p99": 98
+        },
+        "output": {
+          "present": 1924378,
+          "empty": 0,
+          "types": {
+            "str": 1924378
+          },
+          "total_chars": 54203940,
+          "min_chars": 4,
+          "max_chars": 491,
+          "mean_chars": 28.2,
+          "p50": 23,
+          "p90": 52,
+          "p99": 98
+        },
+        "source": {
+          "present": 1924378,
+          "empty": 0,
+          "types": {
+            "str": 1924378
+          },
+          "total_chars": 20680884,
+          "min_chars": 4,
+          "max_chars": 21,
+          "mean_chars": 10.7,
+          "p50": 10,
+          "p90": 14,
+          "p99": 16
+        },
+        "category": {
+          "present": 1924378,
+          "empty": 0,
+          "types": {
+            "str": 1924378
+          },
+          "total_chars": 1924378,
+          "min_chars": 1,
+          "max_chars": 1,
+          "mean_chars": 1.0,
+          "p50": 1,
+          "p90": 1,
+          "p99": 1
+        },
+        "_has_box": {
+          "present": 1924378,
+          "empty": 0,
+          "types": {
+            "bool": 1924378
+          },
+          "total_chars": 0
+        }
+      }
+    },
+    "punctuate.jsonl": {
+      "record_count": 46546,
+      "json_errors": 0,
+      "unique_ids": 46546,
+      "duplicate_ids": 0,
+      "duplicate_id_examples": [],
+      "fields": {
+        "id": {
+          "present": 46546,
+          "empty": 0,
+          "types": {
+            "str": 46546
+          },
+          "total_chars": 500900,
+          "min_chars": 7,
+          "max_chars": 11,
+          "mean_chars": 10.8,
+          "p50": 11,
+          "p90": 11,
+          "p99": 11
+        },
+        "task": {
+          "present": 46546,
+          "empty": 0,
+          "types": {
+            "str": 46546
+          },
+          "total_chars": 418914,
+          "min_chars": 9,
+          "max_chars": 9,
+          "mean_chars": 9.0,
+          "p50": 9,
+          "p90": 9,
+          "p99": 9
+        },
+        "instruction": {
+          "present": 46546,
+          "empty": 0,
+          "types": {
+            "str": 46546
+          },
+          "total_chars": 455008,
+          "min_chars": 7,
+          "max_chars": 17,
+          "mean_chars": 9.8,
+          "p50": 8,
+          "p90": 17,
+          "p99": 17
+        },
+        "input": {
+          "present": 46546,
+          "empty": 0,
+          "types": {
+            "str": 46546
+          },
+          "total_chars": 7991603,
+          "min_chars": 20,
+          "max_chars": 400,
+          "mean_chars": 171.7,
+          "p50": 170,
+          "p90": 190,
+          "p99": 286
+        },
+        "output": {
+          "present": 46546,
+          "empty": 0,
+          "types": {
+            "str": 46546
+          },
+          "total_chars": 9798016,
+          "min_chars": 30,
+          "max_chars": 478,
+          "mean_chars": 210.5,
+          "p50": 208,
+          "p90": 229,
+          "p99": 305
+        },
+        "source": {
+          "present": 46546,
+          "empty": 0,
+          "types": {
+            "str": 46546
+          },
+          "total_chars": 102206,
+          "min_chars": 2,
+          "max_chars": 5,
+          "mean_chars": 2.2,
+          "p50": 2,
+          "p90": 3,
+          "p99": 5
+        },
+        "category": {
+          "present": 46546,
+          "empty": 0,
+          "types": {
+            "str": 46546
+          },
+          "total_chars": 46546,
+          "min_chars": 1,
+          "max_chars": 1,
+          "mean_chars": 1.0,
+          "p50": 1,
+          "p90": 1,
+          "p99": 1
+        },
+        "_has_box": {
+          "present": 46546,
+          "empty": 0,
+          "types": {
+            "bool": 46546
+          },
+          "total_chars": 0
+        }
+      }
+    }
+  }
+}
