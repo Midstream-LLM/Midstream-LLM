@@ -1,0 +1,17 @@
+{
+  "algorithm": "byte-level-bpe",
+  "source": "/Volumes/PS2000/LLM/Jishui/dataset/normalized/ccc_corpus.jsonl",
+  "vocab_size_requested": 24576,
+  "vocab_size_actual": 24576,
+  "min_frequency": 2,
+  "normalization": "none",
+  "add_prefix_space": false,
+  "use_regex": true,
+  "special_tokens": [
+    "<|pad|>",
+    "<|unk|>",
+    "<|endoftext|>",
+    "<|im_start|>",
+    "<|im_end|>"
+  ]
+}

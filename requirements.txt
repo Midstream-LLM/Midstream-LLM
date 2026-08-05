@@ -1,0 +1,5 @@
+# Jishui（集水）runtime dependencies
+# 包管理：venv + pip；新增依赖写在这里。
+opencc-python-reimplemented>=2.4   # 简繁转换（报告/重叠检测）
+huggingface_hub>=1.0               # 数据集下载
+pyarrow>=17.0                      # parquet（大汉书数据集）

@@ -1,0 +1,13 @@
+{
+  "backend": "tokenizers",
+  "clean_up_tokenization_spaces": false,
+  "eos_token": "<|endoftext|>",
+  "extra_special_tokens": [
+    "<|im_start|>",
+    "<|im_end|>"
+  ],
+  "model_max_length": 2048,
+  "pad_token": "<|pad|>",
+  "tokenizer_class": "TokenizersBackend",
+  "unk_token": "<|unk|>"
+}
