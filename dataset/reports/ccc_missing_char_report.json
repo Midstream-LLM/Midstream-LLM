@@ -4,188 +4,12 @@
     "unique_chars": 16942
   },
   "daizhige": {
-    "total_chars": 1807620280,
-    "unique_chars": 26562
+    "total_chars": 1743337656,
+    "unique_chars": 26558
   },
   "chars_in_daizhige_missing_from_ccc": {
-    "count": 10312,
+    "count": 10308,
     "top_200": [
-      {
-        "char": ".",
-        "freq": 16490
-      },
-      {
-        "char": "8",
-        "freq": 16369
-      },
-      {
-        "char": "T",
-        "freq": 16225
-      },
-      {
-        "char": "K",
-        "freq": 16078
-      },
-      {
-        "char": "o",
-        "freq": 16011
-      },
-      {
-        "char": "l",
-        "freq": 15938
-      },
-      {
-        "char": "t",
-        "freq": 15916
-      },
-      {
-        "char": "i",
-        "freq": 15915
-      },
-      {
-        "char": "a",
-        "freq": 15913
-      },
-      {
-        "char": "n",
-        "freq": 15898
-      },
-      {
-        "char": "r",
-        "freq": 15864
-      },
-      {
-        "char": "p",
-        "freq": 15858
-      },
-      {
-        "char": "e",
-        "freq": 15851
-      },
-      {
-        "char": "c",
-        "freq": 15850
-      },
-      {
-        "char": "s",
-        "freq": 15847
-      },
-      {
-        "char": "h",
-        "freq": 15845
-      },
-      {
-        "char": "m",
-        "freq": 15842
-      },
-      {
-        "char": "b",
-        "freq": 15833
-      },
-      {
-        "char": "k",
-        "freq": 15812
-      },
-      {
-        "char": "O",
-        "freq": 15802
-      },
-      {
-        "char": "S",
-        "freq": 15801
-      },
-      {
-        "char": "f",
-        "freq": 15801
-      },
-      {
-        "char": "y",
-        "freq": 15787
-      },
-      {
-        "char": "M",
-        "freq": 15782
-      },
-      {
-        "char": "X",
-        "freq": 15782
-      },
-      {
-        "char": "q",
-        "freq": 15776
-      },
-      {
-        "char": "v",
-        "freq": 15772
-      },
-      {
-        "char": "R",
-        "freq": 15760
-      },
-      {
-        "char": "\u0016",
-        "freq": 15697
-      },
-      {
-        "char": "�",
-        "freq": 15696
-      },
-      {
-        "char": "\u0001",
-        "freq": 15696
-      },
-      {
-        "char": "\u0003",
-        "freq": 15696
-      },
-      {
-        "char": "\u0015",
-        "freq": 15695
-      },
-      {
-        "char": "\b",
-        "freq": 15695
-      },
-      {
-        "char": "\u001e",
-        "freq": 15695
-      },
-      {
-        "char": "\u001c",
-        "freq": 15695
-      },
-      {
-        "char": "\u0002",
-        "freq": 15695
-      },
-      {
-        "char": "\u0004",
-        "freq": 15695
-      },
-      {
-        "char": "\u0005",
-        "freq": 15695
-      },
-      {
-        "char": "\u0007",
-        "freq": 15694
-      },
-      {
-        "char": "\u0000",
-        "freq": 15694
-      },
-      {
-        "char": "\u000b",
-        "freq": 15694
-      },
-      {
-        "char": "\u000e",
-        "freq": 15694
-      },
-      {
-        "char": "d",
-        "freq": 1817
-      },
       {
         "char": "穏",
         "freq": 1124
@@ -219,6 +43,10 @@
         "freq": 805
       },
       {
+        "char": ".",
+        "freq": 796
+      },
+      {
         "char": "卄",
         "freq": 743
       },
@@ -229,6 +57,10 @@
       {
         "char": "疳",
         "freq": 687
+      },
+      {
+        "char": "8",
+        "freq": 675
       },
       {
         "char": "閦",
@@ -253,6 +85,10 @@
       {
         "char": "鶱",
         "freq": 534
+      },
+      {
+        "char": "T",
+        "freq": 531
       },
       {
         "char": "戽",
@@ -363,6 +199,10 @@
         "freq": 385
       },
       {
+        "char": "K",
+        "freq": 384
+      },
+      {
         "char": "H",
         "freq": 380
       },
@@ -425,6 +265,10 @@
       {
         "char": "寧",
         "freq": 319
+      },
+      {
+        "char": "o",
+        "freq": 317
       },
       {
         "char": "龎",
@@ -527,6 +371,10 @@
         "freq": 244
       },
       {
+        "char": "l",
+        "freq": 244
+      },
+      {
         "char": "縧",
         "freq": 244
       },
@@ -611,6 +459,18 @@
         "freq": 222
       },
       {
+        "char": "t",
+        "freq": 222
+      },
+      {
+        "char": "i",
+        "freq": 221
+      },
+      {
+        "char": "a",
+        "freq": 219
+      },
+      {
         "char": "墖",
         "freq": 218
       },
@@ -664,6 +524,10 @@
       },
       {
         "char": "欱",
+        "freq": 204
+      },
+      {
+        "char": "n",
         "freq": 204
       },
       {
@@ -809,6 +673,142 @@
       {
         "char": "",
         "freq": 183
+      },
+      {
+        "char": "誵",
+        "freq": 182
+      },
+      {
+        "char": "",
+        "freq": 182
+      },
+      {
+        "char": "縀",
+        "freq": 182
+      },
+      {
+        "char": "＇",
+        "freq": 182
+      },
+      {
+        "char": "倛",
+        "freq": 181
+      },
+      {
+        "char": "蘐",
+        "freq": 181
+      },
+      {
+        "char": "",
+        "freq": 181
+      },
+      {
+        "char": "臕",
+        "freq": 180
+      },
+      {
+        "char": "",
+        "freq": 180
+      },
+      {
+        "char": "蓛",
+        "freq": 178
+      },
+      {
+        "char": "",
+        "freq": 178
+      },
+      {
+        "char": "",
+        "freq": 178
+      },
+      {
+        "char": "篿",
+        "freq": 177
+      },
+      {
+        "char": "墪",
+        "freq": 177
+      },
+      {
+        "char": "賍",
+        "freq": 177
+      },
+      {
+        "char": "",
+        "freq": 176
+      },
+      {
+        "char": "頩",
+        "freq": 175
+      },
+      {
+        "char": "轣",
+        "freq": 175
+      },
+      {
+        "char": "椉",
+        "freq": 175
+      },
+      {
+        "char": "撋",
+        "freq": 174
+      },
+      {
+        "char": "洓",
+        "freq": 174
+      },
+      {
+        "char": "楳",
+        "freq": 173
+      },
+      {
+        "char": "j",
+        "freq": 171
+      },
+      {
+        "char": "盦",
+        "freq": 171
+      },
+      {
+        "char": "",
+        "freq": 171
+      },
+      {
+        "char": "r",
+        "freq": 170
+      },
+      {
+        "char": "",
+        "freq": 170
+      },
+      {
+        "char": "粖",
+        "freq": 169
+      },
+      {
+        "char": "ㄆ",
+        "freq": 169
+      },
+      {
+        "char": "J",
+        "freq": 169
+      },
+      {
+        "char": "慂",
+        "freq": 169
+      },
+      {
+        "char": "嚱",
+        "freq": 168
+      },
+      {
+        "char": "桊",
+        "freq": 168
+      },
+      {
+        "char": "",
+        "freq": 168
       }
     ]
   },
@@ -1617,6 +1617,6 @@
       }
     ]
   },
-  "union_unique_chars": 27254,
+  "union_unique_chars": 27250,
   "note": "daizhige char frequencies are approximations (counted once per chunk of unique chars); CCC frequencies are exact."
 }

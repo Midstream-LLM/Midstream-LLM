@@ -35,16 +35,16 @@ dataset/
 ```
 
 ### 殆知阁（daizhigev20）
-plain UTF-8（部分带 BOM），**简繁混杂**（正史等多为简体，佛藏/集藏多为繁体），以**全角空格 `　` (U+3000)** 作缩进/段首。不要按 ASCII whitespace 清洗，否则会破坏版式语义。
-十藏实际文件数（共 **31,388** 个 txt，非 15.7k）：
+plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体，佛藏/集藏多为繁体），以**全角空格 `　` (U+3000)** 作缩进/段首。不要按 ASCII whitespace 清洗，否则会破坏版式语义。
+十藏实际文件数（共 **15,694** 个 txt；同目录有等量 macOS `._` AppleDouble 元数据旁车文件，脚本一律跳过）：
 - 佛藏 5135 · 史藏 2043 · 集藏 1948 · 道藏 1721 · 子藏 1463
 - 医藏 911 · 儒藏 908 · 诗藏 776 · 艺藏 446 · 易藏 343
-- 统计：27,070,150 行 / 1,807,620,280 字符（manifest 结果）
+- 统计：27,054,456 行 / 1,743,337,656 字符（manifest 结果，已排除 `._`）
 - 史藏/正史/ 含二十四史各书 txt（四库本，简体，已断句）；编年/ 含资治通鉴。
 - 遵守 `使用须知.md`：研究用途；不要把语料重新分发或商用。
 
 ### 新增数据集要点（manifest 与 extra 报告见 reports/）
-- **CCC**：简体为主（1.86M/1.98M 记录），corpus 12,009 条（二十四史前 15 部+通鉴+十三经+说文，点校本），translate 1.92M 条，punctuate 46.5k 条。与殆知阁重叠：corpus 92.5%、punctuate 79.8%、translate 10.6%（24 字窗口 t2s 匹配估计，见 ccc_overlap_daizhige_report.json）。
+- **CCC**：简体为主（1.86M/1.98M 记录），corpus 12,009 条（二十四史前 15 部+通鉴+十三经+说文，点校本），translate 1.92M 条，punctuate 46.5k 条。与殆知阁重叠：corpus 92.7%、punctuate 80.1%、translate 10.6%（24 字窗口 t2s 匹配估计，见 ccc_overlap_daizhige_report.json）。
 - **chinese-poetry**：JSON 数组文件（全唐诗/宋词/元曲/蒙学等），共 251M 字符。
 - **ming-qing-wenji**：单 jsonl，82M 字符，字段 id/dynasty/collection/page/juans/siku_category/author/char_count/text。
 - **erya**：src/tgt 古译今平行文本 + monolingual 古文，解压后 2.1B 字符（含译文），训练配比需区分。
@@ -62,13 +62,10 @@ plain UTF-8（部分带 BOM），**简繁混杂**（正史等多为简体，佛�
 6×V100 32G 视角：600M–1.5B 用 **DDP + grad checkpoint** 即可放下，不需要 FSDP（DDP 会复制 params/optimizer/grads，1.5B + Adam-fp32 约 ~21GB/卡，32G 紧但可行）。FSDP 等超出 1.5B 再考虑。
 启动多卡：`torchrun --nproc_per_node=N`。
 
-## 待办：先把文档整理出来（当前阶段）
-用户明确：先把整个项目的文档整理出来再动代码。本文件是第一步；后续应在 `src/jishui/` 落地前补：
-- `docs/` 或 `src/jishui/` 下的模型配置说明（layers/heads/d_model 数值，需对齐 Qwen3-1.7B 的尺度）
-- tokenizer 训练记录（词表大小、单字 vs BPE merge 的取舍——古汉语像素粒度与 BPE 的选择仍是开放问题；v0 实验数据：ccc-bbpe-24k chars/token=1.37、32k=1.42，生僻字/异体字/□ 均单 token 无损往返）
-- 数据流水线设计（清洗/去重/分片/token 量级统计与 mix 配比）
-
-在这些文档就位前，不要先写训练脚本。
+## 待办：数据管线已跑通（2026-08-07），下一步写训练脚本
+- 数据生产已全量完成：inventory→clean→五级去重→split→tokenize（ccc-bbpe-32k，21 shard，**41.55 亿 tokens**，1,872,156 文档）→ 15 项统计（`dataset/reports/pipeline/token_stats.json` + `report.md`）→ 采样权重（`dataset/processed/sampling_weights.json`）→ 训练集 manifest 已冻结（`dataset/processed/split/` + `manifest/docs_tokens.jsonl`）。
+- 复现：`bash scripts/pipeline/run_all.sh`；断点续跑：`bash scripts/pipeline/resume_dedup.sh`；运行说明见 `docs/data-production-run.md`。
+- 下一步：按 `sampling_weights.json` 实现训练 sampler，然后写 pretraining 脚本（fp16 + AMP + GradScaler；V100 无 bf16；DDP + grad checkpoint，600M/1.5B 配置见 `docs/model-config.md`）。
 
 ## 不要做
 - 不要在 `dataset/raw/` 下改写/移动语料（manifest/normalized/reports/processed 由脚本产出，可重建）。

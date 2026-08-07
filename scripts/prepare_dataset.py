@@ -72,6 +72,11 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
 
 
+def is_sidecar(p: Path) -> bool:
+    """macOS AppleDouble metadata files (._xxx) are not data; skip everywhere."""
+    return p.name.startswith("._")
+
+
 def md5_int(s: str) -> int:
     return int.from_bytes(hashlib.md5(s.encode("utf-8")).digest()[:8], "big")
 
@@ -123,7 +128,7 @@ def cmd_extra(args: argparse.Namespace) -> None:
         uniq = set()
         kinds = Counter()
         for p in sorted(root.rglob("*")):
-            if not p.is_file() or ".git" in p.parts:
+            if not p.is_file() or ".git" in p.parts or is_sidecar(p):
                 continue
             rel = p.relative_to(root)
             kind = p.suffix.lower().lstrip(".") or "none"
@@ -171,7 +176,7 @@ def detect_schemas(root: Path) -> dict:
     """Sample-based schema detection for jsonl / json-array / parquet files."""
     out = {}
     for p in sorted(root.rglob("*")):
-        if not p.is_file() or ".git" in p.parts:
+        if not p.is_file() or ".git" in p.parts or is_sidecar(p):
             continue
         kind = p.suffix.lower().lstrip(".")
         if kind == "jsonl":
@@ -228,7 +233,7 @@ def cmd_manifest(args: argparse.Namespace) -> None:
     n_txt = n_lines = n_chars = 0
     with (MANIFESTS / "daizhigev20.jsonl").open("w", encoding="utf-8") as out:
         for p in sorted(DAIZHIGE.rglob("*")):
-            if not p.is_file():
+            if not p.is_file() or is_sidecar(p):
                 continue
             rel = p.relative_to(DAIZHIGE)
             entry = {
@@ -321,6 +326,8 @@ def scan_daizhige(t2s):
     window_keys = set()
     files = lines = chars = 0
     for p in sorted(DAIZHIGE.rglob("*.txt")):
+        if is_sidecar(p):
+            continue
         text = read_text(p)
         files += 1
         lines += text.count("\n") + (0 if text.endswith("\n") else 1)
@@ -420,7 +427,7 @@ def cmd_reports(args: argparse.Namespace) -> None:
 
     log("pass 1/2: scanning daizhigev20 (chars + window keys) ...")
     dz_counts, dz_keys, dz_files, dz_lines, dz_chars = scan_daizhige(t2s)
-    dz_basenames = {p.stem for p in DAIZHIGE.rglob("*.txt")}
+    dz_basenames = {p.stem for p in DAIZHIGE.rglob("*.txt") if not is_sidecar(p)}
 
     schema = {"total_chars_ccc": 0, "files": {}}
     script = {"overall": Counter(), "files": {}}
