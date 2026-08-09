@@ -27,3 +27,21 @@ env/
 
 # Zip files
 *.zip
+
+# Local training outputs / generated compact data indices
+/runs/
+
+# Native ANE build products and local fp32 checkpoints
+/native/ane/**/train
+/native/ane/**/*.ckpt
+/native/ane/**/ane_*_ckpt.bin
+/native/ane/training_dynamic/.build/
+/native/ane/hybrid/*_probe
+/.build-tmp/
+
+# Large regenerable data / local session artifacts (see HANDOFF.md)
+/dataset/interim/
+/dataset/quarantine/
+/dataset/processed.7z
+/dataset/reports/pipeline/logs/
+/session-ses_02dc.md
