@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jishui"
+version = "0.1.0"
+description = "Jishui classical Chinese decoder-only language model"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "mlx>=0.32,<0.33; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "tokenizers>=0.20",
+]
+
+[project.scripts]
+jishui-train-mlx = "jishui.train_mlx:main"
+jishui-generate-mlx = "jishui.generate_mlx:main"
+jishui-torch-runtime = "jishui.train_torch:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

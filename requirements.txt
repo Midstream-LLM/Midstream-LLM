@@ -3,3 +3,6 @@
 opencc-python-reimplemented>=2.4   # 简繁转换（报告/重叠检测）
 huggingface_hub>=1.0               # 数据集下载
 pyarrow>=17.0                      # parquet（大汉书数据集）
+numpy>=1.26                        # token shard / 训练索引
+mlx>=0.32,<0.33                    # Apple Silicon 本机训练
+tokenizers>=0.20                   # 自训 BPE tokenizer / inference
