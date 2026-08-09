@@ -1,0 +1,4 @@
+mps_gemm_probe
+metal_silu_probe
+metal_layernorm_probe
+metal_layernorm_bwd_probe
