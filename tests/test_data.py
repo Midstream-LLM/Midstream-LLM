@@ -40,6 +40,24 @@ class DataIteratorTest(unittest.TestCase):
         batch = next(iterator)
         np.testing.assert_array_equal(batch[0], [10, 11, 2, 20, 21, 22, 2, 10])
 
+    def test_sequential_category_filter(self):
+        self.index.splits[:] = 1
+        self.index.categories[:] = [1, 2]
+        iterator = SequentialBatchIterator(
+            self.index, "val", seq_len=4, batch_size=1, category=2
+        )
+        batch = next(iterator)
+        # Only doc 1 (tokens [20, 21, 22]) matches category 2.
+        np.testing.assert_array_equal(batch[0], [20, 21, 22, 2, 20])
+
+    def test_sequential_category_filter_empty_raises(self):
+        self.index.splits[:] = 1
+        self.index.categories[:] = [1, 1]
+        with self.assertRaises(ValueError):
+            SequentialBatchIterator(
+                self.index, "val", seq_len=4, batch_size=1, category=2
+            )
+
     def test_packed_batch_shape_and_resume(self):
         sampling = {
             "target_mix": {"1": 1.0},

@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--grad-accum-steps", type=int)
     parser.add_argument("--dtype", choices=tuple(DTYPES))
+    parser.add_argument("--loss-scale", type=float)
     parser.add_argument("--log-interval", type=int)
     parser.add_argument("--eval-interval", type=int)
     parser.add_argument("--save-interval", type=int)
@@ -59,6 +60,7 @@ def apply_overrides(config: TrainConfig, args: argparse.Namespace) -> TrainConfi
         "batch_size",
         "grad_accum_steps",
         "dtype",
+        "loss_scale",
         "log_interval",
         "eval_interval",
         "save_interval",
@@ -194,14 +196,71 @@ def evaluate(
     return total / config.eval_batches
 
 
-def make_loss_and_grad(model: JishuiForCausalLM, config: TrainConfig):
+def evaluate_by_category(
+    model: JishuiForCausalLM,
+    index: PretrainIndex,
+    config: TrainConfig,
+) -> dict[int, float]:
+    """Mean validation loss per category (1..6), for categories with val docs."""
+    model.eval()
     loss_fn = lambda inputs, targets: causal_lm_loss(model, inputs, targets)
-    loss_and_grad = nn.value_and_grad(model, loss_fn)
+    losses: dict[int, float] = {}
+    for category in range(1, 7):
+        try:
+            iterator = SequentialBatchIterator(
+                index,
+                split="val",
+                seq_len=config.seq_len,
+                batch_size=config.batch_size,
+                eod_token_id=config.eod_token_id,
+                category=category,
+            )
+        except ValueError:
+            continue
+        total = 0.0
+        for _ in range(config.eval_batches):
+            batch = next(iterator)
+            inputs = mx.array(batch[:, :-1])
+            targets = mx.array(batch[:, 1:])
+            loss = loss_fn(inputs, targets)
+            mx.eval(loss)
+            total += float(loss.item())
+        losses[category] = total / config.eval_batches
+    model.train()
+    return losses
+
+
+def make_loss_and_grad(model: JishuiForCausalLM, config: TrainConfig):
+    loss_scale = float(config.loss_scale)
+    inverse_scale = 1.0 / loss_scale
+
+    def scaled_loss_fn(inputs, targets):
+        return causal_lm_loss(model, inputs, targets) * loss_scale
+
+    scaled_loss_and_grad = nn.value_and_grad(model, scaled_loss_fn)
+
+    def loss_and_grad(inputs, targets):
+        scaled_loss, scaled_gradients = scaled_loss_and_grad(inputs, targets)
+        gradients = tree_map(
+            lambda value: value.astype(mx.float32) * inverse_scale,
+            scaled_gradients,
+        )
+        return scaled_loss * inverse_scale, gradients
+
     if not config.compile_step:
         return loss_and_grad
     # Compile one microbatch at a time. Compiling the entire accumulation loop
     # would retain all intermediate activations and defeat memory savings.
     return mx.compile(loss_and_grad, inputs=[model.state], outputs=[model.state])
+
+
+def optimizer_gradients(model: JishuiForCausalLM, gradients: object) -> object:
+    """Cast accurate fp32 accumulated gradients to the parameter dtype."""
+    return tree_map(
+        lambda gradient, parameter: gradient.astype(parameter.dtype),
+        gradients,
+        model.trainable_parameters(),
+    )
 
 
 def train(
@@ -243,7 +302,7 @@ def train(
 
         grads = tree_map(lambda value: value / config.grad_accum_steps, accumulated_grads)
         grads, grad_norm = optim.clip_grad_norm(grads, config.grad_clip)
-        optimizer.update(model, grads)
+        optimizer.update(model, optimizer_gradients(model, grads))
         mx.eval(model.parameters(), optimizer.state, grad_norm)
 
         step_tokens = config.batch_size * config.seq_len * config.grad_accum_steps
@@ -273,11 +332,17 @@ def train(
 
         if config.eval_interval > 0 and step % config.eval_interval == 0:
             validation_loss = evaluate(model, index, config)
+            by_category = evaluate_by_category(model, index, config)
+            category_ppl = " ".join(
+                f"c{category}={math.exp(min(loss, 20.0)):.1f}"
+                for category, loss in sorted(by_category.items())
+            )
             LOG.info(
-                "validation step=%d loss=%.4f ppl=%.2f",
+                "validation step=%d loss=%.4f ppl=%.2f per_category=%s",
                 step,
                 validation_loss,
                 math.exp(min(validation_loss, 20.0)),
+                category_ppl,
             )
 
         if config.save_interval > 0 and step % config.save_interval == 0:
@@ -308,12 +373,23 @@ def train(
         LOG.info("saved final checkpoint %s", checkpoint)
 
 
+def _configure_logging(log_file: Path) -> None:
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    stream = logging.StreamHandler()
+    stream.setFormatter(formatter)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+    root.addHandler(stream)
+    root.addHandler(file_handler)
+
+
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     args = parse_args()
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    _configure_logging(args.run_dir / "trainlog.txt")
     model_config, train_config = load_run_config(args.config)
     train_config = apply_overrides(train_config, args)
     if train_config.seq_len > model_config.max_position_embeddings:
@@ -322,7 +398,6 @@ def main() -> None:
             f"{model_config.max_position_embeddings}"
         )
 
-    args.run_dir.mkdir(parents=True, exist_ok=True)
     index_cache = args.index_cache or args.run_dir / "cache" / "pretrain_index.npz"
     index, rebuilt = load_or_build_index(args.data_dir, index_cache)
     LOG.info("pretrain index: %s (%s)", index_cache, "rebuilt" if rebuilt else "cached")

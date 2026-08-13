@@ -340,11 +340,15 @@ class SequentialBatchIterator(Iterator[np.ndarray]):
         seq_len: int,
         batch_size: int,
         eod_token_id: int = 2,
+        category: int | None = None,
     ):
         self.index = index
         self.doc_ids = index.indices_for(split)
+        if category is not None:
+            self.doc_ids = self.doc_ids[index.categories[self.doc_ids] == category]
         if len(self.doc_ids) == 0:
-            raise ValueError(f"no usable documents in {split}")
+            label = f"{split} category={category}" if category is not None else split
+            raise ValueError(f"no usable documents in {label}")
         self.seq_len = seq_len
         self.batch_size = batch_size
         self.eod_token_id = eod_token_id

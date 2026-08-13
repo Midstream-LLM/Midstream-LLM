@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,7 @@ class ModelConfig:
 class TrainConfig:
     seed: int = 42
     dtype: str = "float16"
+    loss_scale: float = 1.0
     seq_len: int = 2048
     batch_size: int = 1
     grad_accum_steps: int = 8
@@ -83,6 +85,8 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.dtype not in {"float32", "float16", "bfloat16"}:
             raise ValueError("dtype must be float32, float16, or bfloat16")
+        if not math.isfinite(self.loss_scale) or self.loss_scale <= 0:
+            raise ValueError("loss_scale must be finite and positive")
         if min(self.seq_len, self.batch_size, self.grad_accum_steps, self.max_steps) < 1:
             raise ValueError("sequence, batch, accumulation, and step values must be positive")
         if self.sampling_mode not in {"target", "weights"}:

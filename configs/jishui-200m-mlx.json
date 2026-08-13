@@ -21,6 +21,7 @@
   "training": {
     "seed": 42,
     "dtype": "float16",
+    "loss_scale": 256.0,
     "seq_len": 2048,
     "batch_size": 1,
     "grad_accum_steps": 8,
