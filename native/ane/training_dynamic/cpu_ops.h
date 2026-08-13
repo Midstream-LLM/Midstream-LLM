@@ -140,26 +140,50 @@ static void adam_update(float *w, const float *g, AdamState *s, int t, float lr,
     }
 }
 
-// Cross-entropy loss for token-major logits [S,V].  Keeping each vocabulary
-// row contiguous avoids the cache-hostile gather/scatter required by [V,S].
-static float cross_entropy_loss(float *dlogits, const float *logits, const uint16_t *targets, int V, int S) {
+// Adam update for a matrix whose ANE copy is stored transposed.  The master
+// weight keeps its row-major [rows, cols] layout for dW and backward, while
+// `transposed` is populated in the channel-first [cols, rows] layout consumed
+// by the dynamic MIL matmul.  Combining these passes avoids rereading and
+// rewriting every large projection matrix just to transpose it after Adam.
+static void adam_update_with_transpose(float *w, float *transposed,
+                                        const float *g, AdamState *s, int t,
+                                        float lr, float b1, float b2, float eps,
+                                        float wd, int rows, int cols) {
+    float bc1 = 1.0f - powf(b1, t), bc2 = 1.0f - powf(b2, t);
+    for (int r = 0; r < rows; r++) {
+        for (int c = 0; c < cols; c++) {
+            size_t index = (size_t)r * (size_t)cols + (size_t)c;
+            s->m[index] = b1*s->m[index] + (1-b1)*g[index];
+            s->v[index] = b2*s->v[index] + (1-b2)*g[index]*g[index];
+            float mh = s->m[index]/bc1, vh = s->v[index]/bc2;
+            float updated = w[index] -
+                lr * (mh / (sqrtf(vh) + eps) + wd * w[index]);
+            w[index] = updated;
+            transposed[(size_t)c * (size_t)rows + (size_t)r] = updated;
+        }
+    }
+}
+
+// Cross-entropy loss for token-major logits [S,V]. The logits are dead after
+// the loss is computed, so transform them in place into dlogits instead of
+// copying a second full [S,V] tensor.
+static float cross_entropy_loss_inplace(float *logits, const uint16_t *targets,
+                                        int V, int S) {
     float total_loss = 0;
     float invS = 1.0f / S;
     for (int t = 0; t < S; t++) {
-        const float *row = logits + (size_t)t * V;
-        float *drow = dlogits + (size_t)t * V;
-        memcpy(drow, row, (size_t)V * sizeof(float));
-        float maxv; vDSP_maxv(drow, 1, &maxv, (vDSP_Length)V);
+        float *row = logits + (size_t)t * V;
+        float maxv; vDSP_maxv(row, 1, &maxv, (vDSP_Length)V);
         float neg_max = -maxv;
-        vDSP_vsadd(drow, 1, &neg_max, drow, 1, (vDSP_Length)V);
-        int n = V; vvexpf(drow, drow, &n);
-        float sum; vDSP_sve(drow, 1, &sum, (vDSP_Length)V);
+        vDSP_vsadd(row, 1, &neg_max, row, 1, (vDSP_Length)V);
+        int n = V; vvexpf(row, row, &n);
+        float sum; vDSP_sve(row, 1, &sum, (vDSP_Length)V);
         float inv_sum = 1.0f / sum;
-        vDSP_vsmul(drow, 1, &inv_sum, drow, 1, (vDSP_Length)V);
+        vDSP_vsmul(row, 1, &inv_sum, row, 1, (vDSP_Length)V);
         int tgt = targets[t];
-        total_loss -= logf(drow[tgt] + 1e-10f);
-        drow[tgt] -= 1.0f;
-        vDSP_vsmul(drow, 1, &invS, drow, 1, (vDSP_Length)V);
+        total_loss -= logf(row[tgt] + 1e-10f);
+        row[tgt] -= 1.0f;
+        vDSP_vsmul(row, 1, &invS, row, 1, (vDSP_Length)V);
     }
     return total_loss / S;
 }
@@ -247,16 +271,47 @@ static void embed_backward(float *d_embed, const float *dx, const uint16_t *toke
     }
 }
 
-// RoPE backward (in-place): inverse rotation on dQ/dK gradients
-// Data layout: [DIM, SEQ] channel-first, DIM = nheads * hd
+// RoPE backward (in-place): inverse rotation on dQ/dK gradients. Fixed model
+// shapes reuse a precomputed fp32 table instead of evaluating pow/cos/sin for
+// every layer and microstep.
+static float *g_rope_bwd_cos = NULL;
+static float *g_rope_bwd_sin = NULL;
+static int g_rope_bwd_seq = 0, g_rope_bwd_hd = 0;
+
+static bool rope_backward_init(int seq, int hd) {
+    if (g_rope_bwd_cos && g_rope_bwd_seq == seq && g_rope_bwd_hd == hd) return true;
+    free(g_rope_bwd_cos); free(g_rope_bwd_sin);
+    g_rope_bwd_cos = (float*)jishui_malloc((size_t)seq * (hd/2) * sizeof(float));
+    g_rope_bwd_sin = (float*)jishui_malloc((size_t)seq * (hd/2) * sizeof(float));
+    for (int i = 0; i < hd/2; i++) {
+        float freq = 1.0f / powf(10000.0f, 2.0f * i / (float)hd);
+        for (int p = 0; p < seq; p++) {
+            float theta = p * freq;
+            size_t index = (size_t)i * seq + p;
+            g_rope_bwd_cos[index] = cosf(theta);
+            g_rope_bwd_sin[index] = sinf(theta);
+        }
+    }
+    g_rope_bwd_seq = seq; g_rope_bwd_hd = hd;
+    return true;
+}
+
+static void rope_backward_shutdown(void) {
+    free(g_rope_bwd_cos); free(g_rope_bwd_sin);
+    g_rope_bwd_cos = NULL; g_rope_bwd_sin = NULL;
+    g_rope_bwd_seq = 0; g_rope_bwd_hd = 0;
+}
+
 static void rope_backward_inplace(float *dx, int seq, int dim, int hd) {
+    if (!g_rope_bwd_cos || g_rope_bwd_seq != seq || g_rope_bwd_hd != hd)
+        rope_backward_init(seq, hd);
     int nheads = dim / hd;
     for (int h = 0; h < nheads; h++) {
         for (int i = 0; i < hd/2; i++) {
-            float freq = 1.0f / powf(10000.0f, 2.0f * i / (float)hd);
             for (int p = 0; p < seq; p++) {
-                float theta = p * freq;
-                float cos_t = cosf(theta), sin_t = sinf(theta);
+                size_t table_index = (size_t)i * seq + p;
+                float cos_t = g_rope_bwd_cos[table_index];
+                float sin_t = g_rope_bwd_sin[table_index];
 #if ROPE_TRADITIONAL
                 int idx0 = (h * hd + 2 * i) * seq + p;
                 int idx1 = (h * hd + 2 * i + 1) * seq + p;

@@ -93,7 +93,11 @@ static id<MTLBuffer> metal_wrap_iosurface(IOSurfaceRef surface, const char *name
     }
     void *base = IOSurfaceGetBaseAddress(surface);
     size_t bytes = IOSurfaceGetAllocSize(surface);
-    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    IOReturn unlock_result = IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    if (unlock_result != kIOReturnSuccess) {
+        printf("Metal IOSurface %s unlock failed: 0x%x\n", name, unlock_result);
+        return nil;
+    }
     if (!base || bytes == 0) {
         printf("Metal IOSurface %s has no CPU mapping\n", name);
         return nil;
@@ -374,10 +378,16 @@ static bool metal_sdpa_unpack_and_pack(IOSurfaceRef source, IOSurfaceRef wo_inpu
         if(g_metal_shadow){
             if(IOSurfaceLock(source,kIOSurfaceLockReadOnly,NULL)!=kIOReturnSuccess)return false;
             if(IOSurfaceLock(wo_input,kIOSurfaceLockReadOnly,NULL)!=kIOReturnSuccess){
-                IOSurfaceUnlock(source,kIOSurfaceLockReadOnly,NULL);return false;
+                (void)IOSurfaceUnlock(source,kIOSurfaceLockReadOnly,NULL);return false;
             }
             const _Float16 *src=(_Float16*)IOSurfaceGetBaseAddress(source);
             const _Float16 *dst=(_Float16*)IOSurfaceGetBaseAddress(wo_input);
+            if (!src || !dst) {
+                (void)IOSurfaceUnlock(wo_input,kIOSurfaceLockReadOnly,NULL);
+                (void)IOSurfaceUnlock(source,kIOSurfaceLockReadOnly,NULL);
+                printf("Metal shadow SDPA I/O has no CPU mapping\n");
+                return false;
+            }
             float max_diff=0.0f; bool packed=true;
             size_t qc=(size_t)Q_DIM*SEQ,kc=(size_t)KV_DIM*SEQ;
             for(size_t i=0;i<qc;i++){
@@ -390,8 +400,13 @@ static bool metal_sdpa_unpack_and_pack(IOSurfaceRef source, IOSurfaceRef wo_inpu
                 max_diff=fmaxf(max_diff,fabsf(k[i]-(float)src[2*qc+i]));
                 max_diff=fmaxf(max_diff,fabsf(v[i]-(float)src[2*qc+kc+i]));
             }
-            IOSurfaceUnlock(wo_input,kIOSurfaceLockReadOnly,NULL);
-            IOSurfaceUnlock(source,kIOSurfaceLockReadOnly,NULL);
+            IOReturn dst_unlock = IOSurfaceUnlock(wo_input,kIOSurfaceLockReadOnly,NULL);
+            IOReturn src_unlock = IOSurfaceUnlock(source,kIOSurfaceLockReadOnly,NULL);
+            if (dst_unlock != kIOReturnSuccess || src_unlock != kIOReturnSuccess) {
+                printf("Metal shadow SDPA I/O unlock failed: dst=0x%x src=0x%x\n",
+                       dst_unlock, src_unlock);
+                return false;
+            }
             printf("  metal_shadow sdpa_io[%d] unpack=%.3e pack=%s\n",
                    g_metal_sdpa_io_calls++,max_diff,packed?"exact":"FAIL");
             if(max_diff!=0.0f||!packed)return false;
@@ -427,6 +442,11 @@ static bool metal_ffn_unpack_output(IOSurfaceRef source, float *x, float *h1,
         if(g_metal_shadow){
             if(IOSurfaceLock(source,kIOSurfaceLockReadOnly,NULL)!=kIOReturnSuccess)return false;
             const _Float16 *src=(_Float16*)IOSurfaceGetBaseAddress(source);
+            if (!src) {
+                (void)IOSurfaceUnlock(source,kIOSurfaceLockReadOnly,NULL);
+                printf("Metal shadow FFN I/O has no CPU mapping\n");
+                return false;
+            }
             float max_diff=0.0f;
             size_t dc=(size_t)DIM*SEQ,hc=(size_t)HIDDEN*SEQ;
             for(size_t i=0;i<dc;i++)max_diff=fmaxf(max_diff,fabsf(x[i]-(float)src[i]));
@@ -435,7 +455,11 @@ static bool metal_ffn_unpack_output(IOSurfaceRef source, float *x, float *h1,
                 max_diff=fmaxf(max_diff,fabsf(h3[i]-(float)src[dc+hc+i]));
                 max_diff=fmaxf(max_diff,fabsf(silu[i]-(float)src[dc+2*hc+i]));
             }
-            IOSurfaceUnlock(source,kIOSurfaceLockReadOnly,NULL);
+            IOReturn unlock_result = IOSurfaceUnlock(source,kIOSurfaceLockReadOnly,NULL);
+            if (unlock_result != kIOReturnSuccess) {
+                printf("Metal shadow FFN I/O unlock failed: 0x%x\n", unlock_result);
+                return false;
+            }
             printf("  metal_shadow ffn_io[%d] unpack=%.3e\n",g_metal_ffn_io_calls++,max_diff);
             if(max_diff!=0.0f)return false;
         }

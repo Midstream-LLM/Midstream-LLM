@@ -48,51 +48,209 @@ static void cvt_f32_f16(_Float16 *dst, const float *src, int n) {
     }
     for (; i < n; i++) dst[i] = (_Float16)src[i];
 }
+static void cvt_f32_scaled_f16(_Float16 *dst, const float *src, float scale, int n) {
+    int i = 0;
+    float32x4_t factor = vdupq_n_f32(scale);
+    for (; i+7 < n; i += 8) {
+        float16x8_t h = vcombine_f16(
+            vcvt_f16_f32(vmulq_f32(vld1q_f32(src+i), factor)),
+            vcvt_f16_f32(vmulq_f32(vld1q_f32(src+i+4), factor)));
+        vst1q_f16((__fp16*)(dst+i), h);
+    }
+    for (; i < n; i++) dst[i] = (_Float16)(src[i] * scale);
+}
 
-// IOSurface I/O (channel-first [C,S] layout, fp16 on surface)
-static void io_write_fp16(IOSurfaceRef s, const float *data, int channels, int sp) {
-    IOSurfaceLock(s, 0, NULL);
-    cvt_f32_f16((_Float16*)IOSurfaceGetBaseAddress(s), data, channels * sp);
-    IOSurfaceUnlock(s, 0, NULL);
+// IOSurface I/O (channel-first [C,S] layout, fp16 on surface).  Every CPU
+// mapping is fail-closed: a lock/base-address/unlock failure must never leave
+// the caller reading or writing an unvalidated pointer.  This matters on
+// systems where a transient IOSurface mapping failure can otherwise turn into
+// a userspace bad access or an invalid ANE DMA request.
+static bool io_surface_lock_base(IOSurfaceRef surface, uint32_t options,
+                                  void **base, const char *operation) {
+    if (!surface || !base) {
+        printf("IOSurface %s is NULL\n", operation ? operation : "I/O");
+        return false;
+    }
+    IOReturn result = IOSurfaceLock(surface, options, NULL);
+    if (result != kIOReturnSuccess) {
+        printf("IOSurface %s lock failed: 0x%x\n",
+               operation ? operation : "I/O", result);
+        return false;
+    }
+    *base = IOSurfaceGetBaseAddress(surface);
+    if (!*base) {
+        printf("IOSurface %s has no CPU mapping\n",
+               operation ? operation : "I/O");
+        IOReturn unlock_result = IOSurfaceUnlock(surface, options, NULL);
+        if (unlock_result != kIOReturnSuccess)
+            printf("IOSurface %s unlock after mapping failure failed: 0x%x\n",
+                   operation ? operation : "I/O", unlock_result);
+        return false;
+    }
+    return true;
 }
-static void io_read_fp16(IOSurfaceRef s, float *data, int ch_off, int channels, int sp) {
-    IOSurfaceLock(s, kIOSurfaceLockReadOnly, NULL);
-    cvt_f16_f32(data, (_Float16*)IOSurfaceGetBaseAddress(s) + ch_off * sp, channels * sp);
-    IOSurfaceUnlock(s, kIOSurfaceLockReadOnly, NULL);
+
+static bool io_surface_unlock_checked(IOSurfaceRef surface, uint32_t options,
+                                       const char *operation) {
+    IOReturn result = IOSurfaceUnlock(surface, options, NULL);
+    if (result != kIOReturnSuccess) {
+        printf("IOSurface %s unlock failed: 0x%x\n",
+               operation ? operation : "I/O", result);
+        return false;
+    }
+    return true;
 }
-static void io_copy(IOSurfaceRef dst, int dst_ch, IOSurfaceRef src, int src_ch, int channels, int sp) {
-    IOSurfaceLock(dst, 0, NULL);
-    IOSurfaceLock(src, kIOSurfaceLockReadOnly, NULL);
-    memcpy((_Float16*)IOSurfaceGetBaseAddress(dst) + dst_ch*sp,
-           (_Float16*)IOSurfaceGetBaseAddress(src) + src_ch*sp,
-           channels * sp * sizeof(_Float16));
-    IOSurfaceUnlock(src, kIOSurfaceLockReadOnly, NULL);
-    IOSurfaceUnlock(dst, 0, NULL);
+
+static bool io_write_fp16(IOSurfaceRef s, const float *data, int channels, int sp) {
+    if (!data || channels <= 0 || sp <= 0) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "fp16 write")) return false;
+    cvt_f32_f16((_Float16 *)base, data, channels * sp);
+    return io_surface_unlock_checked(s, 0, "fp16 write");
 }
-static void io_write_fp16_at(IOSurfaceRef s, int ch_off, const float *data, int channels, int sp) {
-    IOSurfaceLock(s, 0, NULL);
-    cvt_f32_f16((_Float16*)IOSurfaceGetBaseAddress(s) + ch_off * sp, data, channels * sp);
-    IOSurfaceUnlock(s, 0, NULL);
+
+static bool io_read_fp16(IOSurfaceRef s, float *data, int ch_off, int channels, int sp) {
+    if (!data || ch_off < 0 || channels <= 0 || sp <= 0) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, kIOSurfaceLockReadOnly, &base, "fp16 read")) return false;
+    cvt_f16_f32(data, (_Float16 *)base + (size_t)ch_off * (size_t)sp,
+                channels * sp);
+    return io_surface_unlock_checked(s, kIOSurfaceLockReadOnly, "fp16 read");
+}
+
+static bool io_copy(IOSurfaceRef dst, int dst_ch, IOSurfaceRef src, int src_ch,
+                    int channels, int sp) {
+    if (dst_ch < 0 || src_ch < 0 || channels <= 0 || sp <= 0) return false;
+    void *dst_base = NULL, *src_base = NULL;
+    if (!io_surface_lock_base(dst, 0, &dst_base, "fp16 copy destination")) return false;
+    if (!io_surface_lock_base(src, kIOSurfaceLockReadOnly, &src_base,
+                               "fp16 copy source")) {
+        (void)io_surface_unlock_checked(dst, 0, "fp16 copy destination");
+        return false;
+    }
+    memcpy((_Float16 *)dst_base + (size_t)dst_ch * (size_t)sp,
+           (_Float16 *)src_base + (size_t)src_ch * (size_t)sp,
+           (size_t)channels * (size_t)sp * sizeof(_Float16));
+    bool src_ok = io_surface_unlock_checked(src, kIOSurfaceLockReadOnly,
+                                             "fp16 copy source");
+    bool dst_ok = io_surface_unlock_checked(dst, 0, "fp16 copy destination");
+    return src_ok && dst_ok;
+}
+
+static bool io_write_fp16_at_scaled(IOSurfaceRef s, int ch_off,
+                                    const float *data, float scale,
+                                    int channels, int sp) {
+    if (!data || ch_off < 0 || channels <= 0 || sp <= 0) return false;
+    if (!isfinite(scale) || scale <= 0.0f) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "fp16 offset write")) return false;
+    _Float16 *destination =
+        (_Float16 *)base + (size_t)ch_off * (size_t)sp;
+    if (scale == 1.0f)
+        cvt_f32_f16(destination, data, channels * sp);
+    else
+        cvt_f32_scaled_f16(destination, data, scale, channels * sp);
+    return io_surface_unlock_checked(s, 0, "fp16 offset write");
+}
+static bool io_write_fp16_at(IOSurfaceRef s, int ch_off, const float *data,
+                             int channels, int sp) {
+    return io_write_fp16_at_scaled(s, ch_off, data, 1.0f, channels, sp);
+}
+
+// Batch adjacent channel segments while holding one IOSurface mapping. This
+// is used at the SDPA/QKV boundaries where several tensors share one surface;
+// it preserves each segment's fp16 conversion while removing redundant
+// lock/unlock calls.
+static bool io_write_fp16_at_many_scaled(IOSurfaceRef s,
+                                         const int *channel_offsets,
+                                         const float *const *data,
+                                         const float *scales, int segments,
+                                         int channels, int sp) {
+    if (!s || !channel_offsets || !data || segments <= 0 || channels <= 0 || sp <= 0)
+        return false;
+    size_t capacity = IOSurfaceGetAllocSize(s) / sizeof(_Float16);
+    size_t span = (size_t)channels * (size_t)sp;
+    for (int i = 0; i < segments; i++) {
+        if (!data[i] || channel_offsets[i] < 0) return false;
+        size_t offset = (size_t)channel_offsets[i] * (size_t)sp;
+        if (offset > capacity || span > capacity - offset) return false;
+    }
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "batched fp16 offset write")) return false;
+    _Float16 *destination = (_Float16 *)base;
+    for (int i = 0; i < segments; i++) {
+        float scale = scales ? scales[i] : 1.0f;
+        if (!isfinite(scale) || scale <= 0.0f) {
+            (void)io_surface_unlock_checked(s, 0,
+                                            "batched fp16 offset write");
+            return false;
+        }
+        _Float16 *segment =
+            destination + (size_t)channel_offsets[i] * (size_t)sp;
+        if (scale == 1.0f)
+            cvt_f32_f16(segment, data[i], (int)span);
+        else
+            cvt_f32_scaled_f16(segment, data[i], scale, (int)span);
+    }
+    return io_surface_unlock_checked(s, 0, "batched fp16 offset write");
+}
+
+static bool io_write_fp16_at_many(IOSurfaceRef s, const int *channel_offsets,
+                                  const float *const *data, int segments,
+                                  int channels, int sp) {
+    return io_write_fp16_at_many_scaled(s, channel_offsets, data, NULL,
+                                        segments, channels, sp);
+}
+
+static bool io_read_fp16_at_many(IOSurfaceRef s, const int *channel_offsets,
+                                 float *const *data, int segments,
+                                 int channels, int sp) {
+    if (!s || !channel_offsets || !data || segments <= 0 || channels <= 0 || sp <= 0)
+        return false;
+    size_t capacity = IOSurfaceGetAllocSize(s) / sizeof(_Float16);
+    size_t span = (size_t)channels * (size_t)sp;
+    for (int i = 0; i < segments; i++) {
+        if (!data[i] || channel_offsets[i] < 0) return false;
+        size_t offset = (size_t)channel_offsets[i] * (size_t)sp;
+        if (offset > capacity || span > capacity - offset) return false;
+    }
+    void *base = NULL;
+    if (!io_surface_lock_base(s, kIOSurfaceLockReadOnly, &base,
+                               "batched fp16 read")) return false;
+    const _Float16 *source = (const _Float16 *)base;
+    for (int i = 0; i < segments; i++) {
+        cvt_f16_f32(data[i],
+                    source + (size_t)channel_offsets[i] * (size_t)sp,
+                    (int)span);
+    }
+    return io_surface_unlock_checked(s, kIOSurfaceLockReadOnly,
+                                     "batched fp16 read");
 }
 
 // fp16 IOSurface I/O (for dynamic matmul kernels with fp16 input/output)
-static void io_write_dyn(IOSurfaceRef s, const float *act, int ic, int seq,
+static bool io_write_dyn(IOSurfaceRef s, const float *act, int ic, int seq,
                          const float *W, int oc) {
+    if (!act || !W || ic <= 0 || seq <= 0 || oc <= 0) return false;
     int sp = seq + oc;
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "dynamic fp16 write")) return false;
+    _Float16 *buf = (_Float16 *)base;
     for (int d = 0; d < ic; d++) {
-        cvt_f32_f16(buf + d*sp, act + d*seq, seq);
-        cvt_f32_f16(buf + d*sp + seq, W + d*oc, oc);
+        cvt_f32_f16(buf + (size_t)d * (size_t)sp, act + (size_t)d * (size_t)seq, seq);
+        cvt_f32_f16(buf + (size_t)d * (size_t)sp + seq, W + (size_t)d * (size_t)oc, oc);
     }
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "dynamic fp16 write");
 }
 
 // Read output from dynamic matmul kernel: [1, OC, 1, SEQ]
-static void io_read_dyn(IOSurfaceRef s, float *out, int oc, int seq) {
-    IOSurfaceLock(s, kIOSurfaceLockReadOnly, NULL);
-    cvt_f16_f32(out, (_Float16*)IOSurfaceGetBaseAddress(s), oc * seq);
-    IOSurfaceUnlock(s, kIOSurfaceLockReadOnly, NULL);
+static bool io_read_dyn(IOSurfaceRef s, float *out, int oc, int seq) {
+    if (!out || oc <= 0 || seq <= 0) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, kIOSurfaceLockReadOnly, &base,
+                               "dynamic fp16 read")) return false;
+    cvt_f16_f32(out, (_Float16 *)base, oc * seq);
+    return io_surface_unlock_checked(s, kIOSurfaceLockReadOnly,
+                                     "dynamic fp16 read");
 }
 
 // Compile MIL to ANE kernel
@@ -113,10 +271,14 @@ static Kern *compile_kern_mil_w(NSString *mil, NSDictionary *weights, int ic_byt
     }
     NSError *e = nil;
     if (!((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(mdl, @selector(compileWithQoS:options:error:), 21, @{}, &e)) {
-        printf("  [compile] FAIL: %s\n", e ? [[e description] UTF8String] : "no error"); return NULL;
+        printf("  [compile] FAIL: %s\n", e ? [[e description] UTF8String] : "no error");
+        [[NSFileManager defaultManager] removeItemAtPath:td error:nil];
+        return NULL;
     }
     if (!((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(mdl, @selector(loadWithQoS:options:error:), 21, @{}, &e)) {
-        printf("  [compile] load FAIL\n"); return NULL;
+        printf("  [compile] load FAIL\n");
+        [[NSFileManager defaultManager] removeItemAtPath:td error:nil];
+        return NULL;
     }
     __sync_fetch_and_add(&g_compile_count, 1);
     Kern *k = (Kern*)jishui_calloc(1, sizeof(Kern));
@@ -187,155 +349,233 @@ static void *make_request(Kern *k, IOSurfaceRef ioIn) {
 // sdpaFwd: [1, DIM, 1, SEQ + Q_DIM + KV_DIM + KV_DIM] fp16 — no Wo (separate kernel)
 //   Wq: [DIM, Q_DIM], Wk: [DIM, KV_DIM], Wv: [DIM, KV_DIM]
 #define SDPA_FWD_SP (SEQ + Q_DIM + KV_DIM + KV_DIM)
-static void stage_sdpa_fwd_weights(IOSurfaceRef s, const float *Wq, const float *Wk, const float *Wv) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool stage_sdpa_fwd_weights(IOSurfaceRef s, const float *Wq, const float *Wk, const float *Wv) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "sdpa forward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < DIM; d++) {
         cvt_f32_f16(buf + d*SDPA_FWD_SP + SEQ,                   Wq + d*Q_DIM, Q_DIM);
         cvt_f32_f16(buf + d*SDPA_FWD_SP + SEQ+Q_DIM,             Wk + d*KV_DIM, KV_DIM);
         cvt_f32_f16(buf + d*SDPA_FWD_SP + SEQ+Q_DIM+KV_DIM,     Wv + d*KV_DIM, KV_DIM);
     }
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "sdpa forward weights");
 }
-static void write_sdpa_fwd_acts(IOSurfaceRef s, const float *xnorm) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool write_sdpa_fwd_acts(IOSurfaceRef s, const float *xnorm) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "sdpa forward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < DIM; d++)
         cvt_f32_f16(buf + d*SDPA_FWD_SP, xnorm + d*SEQ, SEQ);
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "sdpa forward activations");
 }
 
 // woFwd: [1, Q_DIM, 1, SEQ + DIM] fp16 — Wo: [Q_DIM, DIM]
 #define WO_FWD_SP (SEQ + DIM)
-static void stage_wo_fwd_weights(IOSurfaceRef s, const float *Wo) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool stage_wo_fwd_weights(IOSurfaceRef s, const float *Wo) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "Wo forward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < Q_DIM; d++)
         cvt_f32_f16(buf + d*WO_FWD_SP + SEQ, Wo + d*DIM, DIM);
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "Wo forward weights");
 }
-static void write_wo_fwd_acts(IOSurfaceRef s, const float *attn_out) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool write_wo_fwd_acts(IOSurfaceRef s, const float *attn_out) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "Wo forward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < Q_DIM; d++)
         cvt_f32_f16(buf + d*WO_FWD_SP, attn_out + d*SEQ, SEQ);
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "Wo forward activations");
 }
 
 // ffnFused: [1, DIM, 1, 2*SEQ+3*HIDDEN] fp16
 #define FFN_FUSED_SP (2*SEQ + 3*HIDDEN)
-static void stage_ffn_fused_weights(IOSurfaceRef s,
+static bool stage_ffn_fused_weights(IOSurfaceRef s,
                                      const float *W1t, const float *W3t, const float *W2_orig) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "FFN forward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < DIM; d++) {
         cvt_f32_f16(buf + d*FFN_FUSED_SP + 2*SEQ,          W1t + d*HIDDEN, HIDDEN);
         cvt_f32_f16(buf + d*FFN_FUSED_SP + 2*SEQ+HIDDEN,   W3t + d*HIDDEN, HIDDEN);
         cvt_f32_f16(buf + d*FFN_FUSED_SP + 2*SEQ+2*HIDDEN, W2_orig + d*HIDDEN, HIDDEN);
     }
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "FFN forward weights");
 }
-static void write_ffn_fused_acts(IOSurfaceRef s, const float *x2norm, const float *x2) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool write_ffn_fused_acts(IOSurfaceRef s, const float *x2norm, const float *x2) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "FFN forward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < DIM; d++) {
         cvt_f32_f16(buf + d*FFN_FUSED_SP,       x2norm + d*SEQ, SEQ);
         cvt_f32_f16(buf + d*FFN_FUSED_SP + SEQ, x2 + d*SEQ, SEQ);
     }
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "FFN forward activations");
 }
 
 // ffnBwdW2t: [1, DIM, 1, SEQ+HIDDEN] fp16
 #define FFN_BWD_W2T_SP (SEQ + HIDDEN)
-static void stage_ffn_bwd_w2t_weights(IOSurfaceRef s, const float *W2) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool stage_ffn_bwd_w2t_weights(IOSurfaceRef s, const float *W2) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "FFN W2 backward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < DIM; d++)
         cvt_f32_f16(buf + d*FFN_BWD_W2T_SP + SEQ, W2 + d*HIDDEN, HIDDEN);
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "FFN W2 backward weights");
 }
-static void write_ffn_bwd_w2t_acts(IOSurfaceRef s, const float *dffn) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool write_ffn_bwd_w2t_acts_scaled(IOSurfaceRef s, const float *dffn,
+                                           float scale) {
+    if (!isfinite(scale) || scale <= 0.0f) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "FFN W2 backward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < DIM; d++)
-        cvt_f32_f16(buf + d*FFN_BWD_W2T_SP, dffn + d*SEQ, SEQ);
-    IOSurfaceUnlock(s, 0, NULL);
+        cvt_f32_scaled_f16(buf + d*FFN_BWD_W2T_SP, dffn + d*SEQ, scale, SEQ);
+    return io_surface_unlock_checked(s, 0, "FFN W2 backward activations");
+}
+static bool write_ffn_bwd_w2t_acts(IOSurfaceRef s, const float *dffn) {
+    return write_ffn_bwd_w2t_acts_scaled(s, dffn, 1.0f);
 }
 
 // ffnBwdW13t: [1, HIDDEN, 1, 2*SEQ+2*DIM] fp16
 #define FFN_BWD_W13T_SP (2*SEQ + 2*DIM)
-static void stage_ffn_bwd_w13t_weights(IOSurfaceRef s, const float *W1, const float *W3) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool stage_ffn_bwd_w13t_weights(IOSurfaceRef s, const float *W1, const float *W3) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "FFN W1/W3 backward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < HIDDEN; d++) {
         cvt_f32_f16(buf + d*FFN_BWD_W13T_SP + 2*SEQ,       W1 + d*DIM, DIM);
         cvt_f32_f16(buf + d*FFN_BWD_W13T_SP + 2*SEQ + DIM, W3 + d*DIM, DIM);
     }
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "FFN W1/W3 backward weights");
 }
-static void write_ffn_bwd_w13t_acts(IOSurfaceRef s, const float *dh1, const float *dh3) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool write_ffn_bwd_w13t_acts_scaled(IOSurfaceRef s, const float *dh1,
+                                            const float *dh3, float scale) {
+    if (!isfinite(scale) || scale <= 0.0f) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "FFN W1/W3 backward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < HIDDEN; d++) {
-        cvt_f32_f16(buf + d*FFN_BWD_W13T_SP,       dh1 + d*SEQ, SEQ);
-        cvt_f32_f16(buf + d*FFN_BWD_W13T_SP + SEQ, dh3 + d*SEQ, SEQ);
+        cvt_f32_scaled_f16(buf + d*FFN_BWD_W13T_SP,       dh1 + d*SEQ, scale, SEQ);
+        cvt_f32_scaled_f16(buf + d*FFN_BWD_W13T_SP + SEQ, dh3 + d*SEQ, scale, SEQ);
     }
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "FFN W1/W3 backward activations");
+}
+static bool write_ffn_bwd_w13t_acts(IOSurfaceRef s, const float *dh1, const float *dh3) {
+    return write_ffn_bwd_w13t_acts_scaled(s, dh1, dh3, 1.0f);
 }
 
 // wotBwd: [1, DIM, 1, SEQ+Q_DIM] fp16 — Wo is [DIM, Q_DIM], matmul gives Wo^T @ dy
 #define WOT_BWD_SP (SEQ + Q_DIM)
-static void stage_wot_bwd_weights(IOSurfaceRef s, const float *Wo) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool stage_wot_bwd_weights(IOSurfaceRef s, const float *Wo) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "Wo backward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < DIM; d++)
         cvt_f32_f16(buf + d*WOT_BWD_SP + SEQ, Wo + d*Q_DIM, Q_DIM);
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "Wo backward weights");
 }
-static void write_wot_bwd_acts(IOSurfaceRef s, const float *dy) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool write_wot_bwd_acts(IOSurfaceRef s, const float *dy) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "Wo backward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < DIM; d++)
         cvt_f32_f16(buf + d*WOT_BWD_SP, dy + d*SEQ, SEQ);
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "Wo backward activations");
 }
 
 // qBwd: [1, Q_DIM, 1, SEQ+DIM] fp16 — Wq is [Q_DIM, DIM], matmul gives Wq^T @ dq
 #define Q_BWD_SP (SEQ + DIM)
-static void stage_q_bwd_weights(IOSurfaceRef s, const float *Wq) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool stage_q_bwd_weights(IOSurfaceRef s, const float *Wq) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "Q backward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < Q_DIM; d++)
         cvt_f32_f16(buf + d*Q_BWD_SP + SEQ, Wq + d*DIM, DIM);
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "Q backward weights");
 }
-static void write_q_bwd_acts(IOSurfaceRef s, const float *dq) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool write_q_bwd_acts_scaled(IOSurfaceRef s, const float *dq,
+                                    float scale) {
+    if (!isfinite(scale) || scale <= 0.0f) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "Q backward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < Q_DIM; d++)
-        cvt_f32_f16(buf + d*Q_BWD_SP, dq + d*SEQ, SEQ);
-    IOSurfaceUnlock(s, 0, NULL);
+        cvt_f32_scaled_f16(buf + d*Q_BWD_SP, dq + d*SEQ, scale, SEQ);
+    return io_surface_unlock_checked(s, 0, "Q backward activations");
+}
+static bool write_q_bwd_acts(IOSurfaceRef s, const float *dq) {
+    return write_q_bwd_acts_scaled(s, dq, 1.0f);
 }
 
 // kvBwd: [1, KV_DIM, 1, 2*SEQ+2*DIM] fp16 — dk @ Wk + dv @ Wv → dx_kv
 #define KV_BWD_SP (2*SEQ + 2*DIM)
-static void stage_kv_bwd_weights(IOSurfaceRef s, const float *Wk, const float *Wv) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool stage_kv_bwd_weights(IOSurfaceRef s, const float *Wk, const float *Wv) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "KV backward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < KV_DIM; d++) {
         cvt_f32_f16(buf + d*KV_BWD_SP + 2*SEQ,       Wk + d*DIM, DIM);
         cvt_f32_f16(buf + d*KV_BWD_SP + 2*SEQ + DIM, Wv + d*DIM, DIM);
     }
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "KV backward weights");
 }
-static void write_kv_bwd_acts(IOSurfaceRef s, const float *dk, const float *dv) {
-    IOSurfaceLock(s, 0, NULL);
-    _Float16 *buf = (_Float16*)IOSurfaceGetBaseAddress(s);
+static bool write_kv_bwd_acts_scaled(IOSurfaceRef s, const float *dk,
+                                     const float *dv, float scale) {
+    if (!isfinite(scale) || scale <= 0.0f) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "KV backward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
     for (int d = 0; d < KV_DIM; d++) {
-        cvt_f32_f16(buf + d*KV_BWD_SP,       dk + d*SEQ, SEQ);
-        cvt_f32_f16(buf + d*KV_BWD_SP + SEQ, dv + d*SEQ, SEQ);
+        cvt_f32_scaled_f16(buf + d*KV_BWD_SP,       dk + d*SEQ, scale, SEQ);
+        cvt_f32_scaled_f16(buf + d*KV_BWD_SP + SEQ, dv + d*SEQ, scale, SEQ);
     }
-    IOSurfaceUnlock(s, 0, NULL);
+    return io_surface_unlock_checked(s, 0, "KV backward activations");
+}
+static bool write_kv_bwd_acts(IOSurfaceRef s, const float *dk, const float *dv) {
+    return write_kv_bwd_acts_scaled(s, dk, dv, 1.0f);
+}
+static bool write_wot_bwd_acts_scaled(IOSurfaceRef s, const float *dy, float scale) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "scaled Wo backward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
+    for (int d = 0; d < DIM; d++)
+        cvt_f32_scaled_f16(buf + d*WOT_BWD_SP, dy + d*SEQ, scale, SEQ);
+    return io_surface_unlock_checked(s, 0, "scaled Wo backward activations");
+}
+
+// qkvBwd is an MHA-only fusion of qBwd and kvBwd. It returns dx_q and the
+// fp16-summed dx_kv used by the established split graph.
+#define QKV_BWD_SP (3*SEQ + 3*DIM)
+static bool stage_qkv_bwd_weights(IOSurfaceRef s, const float *Wq,
+                                  const float *Wk, const float *Wv) {
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "QKV backward weights")) return false;
+    _Float16 *buf = (_Float16*)base;
+    for (int d = 0; d < Q_DIM; d++) {
+        cvt_f32_f16(buf + d*QKV_BWD_SP + 3*SEQ,       Wq + d*DIM, DIM);
+        cvt_f32_f16(buf + d*QKV_BWD_SP + 3*SEQ+DIM,   Wk + d*DIM, DIM);
+        cvt_f32_f16(buf + d*QKV_BWD_SP + 3*SEQ+2*DIM, Wv + d*DIM, DIM);
+    }
+    return io_surface_unlock_checked(s, 0, "QKV backward weights");
+}
+static bool write_qkv_bwd_acts_scaled(IOSurfaceRef s, const float *dq,
+                                      const float *dk, const float *dv,
+                                      float scale) {
+    if (!isfinite(scale) || scale <= 0.0f) return false;
+    void *base = NULL;
+    if (!io_surface_lock_base(s, 0, &base, "QKV backward activations")) return false;
+    _Float16 *buf = (_Float16*)base;
+    for (int d = 0; d < Q_DIM; d++) {
+        cvt_f32_scaled_f16(buf + d*QKV_BWD_SP,       dq + d*SEQ, scale, SEQ);
+        cvt_f32_scaled_f16(buf + d*QKV_BWD_SP + SEQ, dk + d*SEQ, scale, SEQ);
+        cvt_f32_scaled_f16(buf + d*QKV_BWD_SP + 2*SEQ, dv + d*SEQ, scale, SEQ);
+    }
+    return io_surface_unlock_checked(s, 0, "QKV backward activations");
+}
+static bool write_qkv_bwd_acts(IOSurfaceRef s, const float *dq,
+                               const float *dk, const float *dv) {
+    return write_qkv_bwd_acts_scaled(s, dq, dk, dv, 1.0f);
 }
 
 // Free per-layer surfaces and requests
@@ -344,10 +584,12 @@ static void free_per_layer(PerLayerSurfaces *pls, PerLayerRequests *plr) {
 #define RELEASE_IF_SET(value) do { if (value) CFRelease(value); } while (0)
         RELEASE_IF_SET(pls[L].sdpaFwd_in); RELEASE_IF_SET(pls[L].woFwd_in); RELEASE_IF_SET(pls[L].ffnFused_in);
         RELEASE_IF_SET(pls[L].ffnBwdW2t_in); RELEASE_IF_SET(pls[L].ffnBwdW13t_in);
-        RELEASE_IF_SET(pls[L].wotBwd_in); RELEASE_IF_SET(pls[L].qBwd_in); RELEASE_IF_SET(pls[L].kvBwd_in);
+        RELEASE_IF_SET(pls[L].wotBwd_in); RELEASE_IF_SET(pls[L].qBwd_in);
+        RELEASE_IF_SET(pls[L].kvBwd_in); RELEASE_IF_SET(pls[L].qkvBwd_in);
         RELEASE_IF_SET(plr[L].sdpaFwd); RELEASE_IF_SET(plr[L].woFwd); RELEASE_IF_SET(plr[L].ffnFused);
         RELEASE_IF_SET(plr[L].ffnBwdW2t); RELEASE_IF_SET(plr[L].ffnBwdW13t);
-        RELEASE_IF_SET(plr[L].wotBwd); RELEASE_IF_SET(plr[L].qBwd); RELEASE_IF_SET(plr[L].kvBwd);
+        RELEASE_IF_SET(plr[L].wotBwd); RELEASE_IF_SET(plr[L].qBwd);
+        RELEASE_IF_SET(plr[L].kvBwd); RELEASE_IF_SET(plr[L].qkvBwd);
 #undef RELEASE_IF_SET
     }
 }

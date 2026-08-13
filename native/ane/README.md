@@ -28,10 +28,17 @@ system services. macOS 15+ on Apple Silicon is required.
 - Jishui LayerNorm (affine gamma + beta), standard residuals, SwiGLU, tied
   embedding/language head, and MLX-compatible split-half RoPE.
 - Dynamic ANE MIL kernels for the matrix-heavy forward/backward `dx` path.
-- Optional custom Metal kernels for LayerNorm forward/backward and fused SiLU
-  backward (`--metal-norm --metal-silu`). Full-vocabulary cross entropy uses
-  token-major `[SEQ,VOCAB]` storage; bounded asynchronous dW accumulation and
-  AdamW remain on CPU/Accelerate. This is heterogeneous
+- An MHA-only, default-off `--npu-fuse-qkv-bwd` experiment. Its MIL graph
+  returns `dx_q` plus fp16-summed `dx_kv`; the shadow mode reruns the split
+  kernels per layer and fails closed if the oracle is unavailable.
+- Optional custom Metal kernels for LayerNorm forward/backward, fused SiLU
+  backward, and direct ANE IOSurface output conversion (`--metal-norm`,
+  `--metal-silu`, `--metal-io`). The I/O path converts fp16 SDPA/FFN outputs
+  into fp32 backward caches on the GPU and writes the fp16 attention result
+  directly into the pre-staged Wo input without a CPU staging copy.
+  Full-vocabulary cross entropy uses token-major `[SEQ,VOCAB]` storage;
+  bounded asynchronous dW accumulation and AdamW remain on CPU/Accelerate.
+  This is heterogeneous
   ANE+GPU+CPU operator placement, not a pure-NPU trainer or model-replica DDP.
 - The kernels retain GQA tiling/reduction support because the implementation
   is shared with Qwen-style models. Jishui-200M itself uses `KV_HEADS=HEADS`
@@ -53,6 +60,24 @@ make MODEL=jishui_200m_2048
 `jishui_200m` uses `SEQ=256` for a practical first benchmark. The production
 context graph is `MODEL=jishui_200m_2048`. Metal submission overhead makes the
 optional GPU path slower at seq 256; use it only with the production graph.
+
+The MLX-inspired fixed-shape optimization work is documented in
+[`../../docs/npu-optimizations/00-overview.md`](../../docs/npu-optimizations/00-overview.md),
+with a beginner-oriented walkthrough in
+[`../../docs/npu-optimizations/tutorial.md`](../../docs/npu-optimizations/tutorial.md).
+The fixed-record runtime and strict gradient gates completed on 2026-08-11.
+The default optimizations remain available, while QKV backward fusion stays
+off because its paired throughput gate did not show a gain.
+
+The MLX-owned hybrid coordinator is now training-ready. A missing MLX loss
+scale had previously made the standard fp16 MLX gradient look inconsistent
+with native ANE (`0.816` cosine). With `loss_scale=256`, fp32 unscale and fp32
+microbatch accumulation, the real step-7200 single-record shadow reaches
+`0.9997075` cosine and `2.4297%` relative L2; a two-record ANE average reaches
+`0.9996683` and `2.5846%`. A temporary step-7201 checkpoint containing model,
+Adam, sampler RNG, and the new training config was saved and successfully
+resumed for step 7202. The formal run remains at step 7200 until explicitly
+started.
 
 ## Data
 
@@ -97,7 +122,7 @@ make MODEL=jishui_200m_2048
   --index /private/tmp/jishui_ane_train.index \
   --data-dir /Volumes/PS2000/LLM/Jishui/dataset/processed \
   --optimizer-steps 100 --accum 10 \
-  --metal-norm --metal-silu
+  --metal-norm --metal-silu --metal-io
 ```
 
 Index mode is train-only, token-weighted within the selected category, and
@@ -133,6 +158,15 @@ microstep count. Logs include loss, timings, gradients, optimizer LR and a
 sample weight delta. `--parity-report FILE` writes JSONL probes for comparing
 CPU and Metal runs without saving a multi-gigabyte checkpoint.
 
+`--metal-io` only changes the two forward output boundaries. `--metal-shadow`
+enables LayerNorm and Metal I/O together and checks every invocation against
+the CPU implementation; add `--metal-silu` to include the fused SiLU backward
+kernel in the same gate.
+
+`--npu-fuse-qkv-bwd-shadow` implies `--npu-fuse-qkv-bwd` and compares the two
+fused outputs against the established qBwd/kvBwd path at every layer. It is an
+MHA-only diagnostic switch and remains outside the production configuration.
+
 ## Current measured gate
 
 The corrected standard-residual graph produced finite loss and nonzero updates
@@ -142,6 +176,17 @@ completed one real-shard Adam update. Metal reductions are numerically close,
 not bitwise identical: the first index-sampled loss was `10.4381037` on CPU and
 `10.4381294` on Metal. A bounded-record gate retained loss `10.4834` and the
 same sampled weight update across the paired backends.
+
+The direct IOSurface path passed a separate `SEQ=2048`, one-record gate on
+2026-08-09. Across all 30 layers, SDPA and FFN unpack checks had exactly zero
+difference from the fp16 CPU conversion and every SDPA-to-Wo pack was bitwise
+exact. A same-seed CPU-I/O versus `--metal-io` A/B then matched exactly for
+loss, global gradient norm, clipping, five gradient probes, five updated weight
+probes, and ten Adam moment probes. The paired one-step train times were
+6.6280 s and 6.3168 s respectively. However, the measured forward-I/O bucket
+increased from 162.6 ms to 222.2 ms; unrelated ANE/backward timing variation
+accounted for the lower total. This one-step run establishes correctness, not
+a Metal-I/O speedup or sustained-throughput claim.
 
 After changing classifier logits to token-major order and bounding the async dW
 queue, a cool-state paired run measured **5.6265 s** for ANE+CPU and **4.0101 s**
@@ -160,6 +205,14 @@ ANE+CPU and 4.680 s/step on ANE+Metal (15.8% faster). Its CPU losses were
 weights. Under the earlier live-MLX and heavy-swap load, the same production
 shape was effectively tied at 20.654 s versus 20.467 s. These are short gates,
 not a sustained-throughput claim.
+
+The second QKV-backward fusion graph passed a stronger fixed-checkpoint gate:
+all 30 layers matched the split `dx_q`/`dx_kv` outputs bitwise, and the complete
+gradient checker reported relative L2 `3.44296%`, cosine `0.999408`, matching
+the established split result for that record. Performance still rejected the
+feature. After discarding step 0 in each five-step segment, split A, fused and
+split B measured `3.7618`, `3.7731` and `3.7156 s/step`; fused was about 0.9%
+slower than the bracketed split mean. The flag therefore remains default-off.
 
 Replicating the whole model independently on ANE and GPU is not recommended on
 this 24 GB unified-memory, fanless host: it would duplicate parameters,

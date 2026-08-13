@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <arm_neon.h>
+#include <stdatomic.h>
 
 // Include selected model config
 // MODEL_HEADER is set by Makefile via -include models/xxx.h
@@ -74,8 +75,8 @@ typedef struct {
 
 // Per-layer activations (saved for backward)
 typedef struct {
-    float *layer_in, *xnorm, *Q, *K, *V, *attn_out, *o_out;
-    float *x2, *x2norm, *h1, *h3, *silu_out, *ffn_out;
+    float *layer_in, *xnorm, *Q, *K, *V, *attn_out;
+    float *x2, *x2norm, *h1, *h3, *silu_out;
 } LayerActs;
 
 // Per-layer gradients
@@ -90,13 +91,15 @@ typedef struct { void *model; IOSurfaceRef ioIn, ioOut; void *request; void *tmp
 // Per-layer IOSurfaces for pre-staged weights
 typedef struct {
     IOSurfaceRef sdpaFwd_in, woFwd_in, ffnFused_in;
-    IOSurfaceRef ffnBwdW2t_in, ffnBwdW13t_in, wotBwd_in, qBwd_in, kvBwd_in;
+    IOSurfaceRef ffnBwdW2t_in, ffnBwdW13t_in, wotBwd_in;
+    IOSurfaceRef qBwd_in, kvBwd_in, qkvBwd_in;
 } PerLayerSurfaces;
 
 // Per-layer ANE requests (bound to per-layer IOSurfaces)
 typedef struct {
     void *sdpaFwd, *woFwd, *ffnFused;
-    void *ffnBwdW2t, *ffnBwdW13t, *wotBwd, *qBwd, *kvBwd;
+    void *ffnBwdW2t, *ffnBwdW13t, *wotBwd;
+    void *qBwd, *kvBwd, *qkvBwd;
 } PerLayerRequests;
 
 // Checkpoint header
@@ -112,6 +115,44 @@ typedef struct {
     float adam_b1, adam_b2, adam_eps, weight_decay;
     float grad_clip, loss_scale, res_alpha;
 } CkptHdr;
+
+// Shared fp16 tensor file used by the persistent MLX + ANE gradient worker.
+// The 4 KiB payload offset keeps the first tensor naturally page aligned.
+#define HYBRID_MAGIC "JSHHYB1"
+#define HYBRID_VERSION 1u
+#define HYBRID_HEADER_BYTES 4096u
+#define HYBRID_KIND_WEIGHTS 1u
+#define HYBRID_KIND_GRADIENTS 2u
+#define HYBRID_PARAM_COUNT ((uint64_t)VOCAB*DIM + (uint64_t)NLAYERS*LAYER_PARAMS + 2u*DIM)
+typedef struct {
+    char magic[8];
+    uint32_t version, header_bytes, kind, reserved;
+    uint64_t parameter_count;
+    uint32_t n_layers, vocab_size, dim, hidden_dim, n_heads, kv_heads;
+} HybridTensorHeader;
+_Static_assert(sizeof(HybridTensorHeader) == 56, "hybrid header layout changed");
+
+typedef struct {
+    int fd;
+    size_t bytes;
+    void *mapping;
+    _Float16 *values;
+} HybridTensorMap;
+
+#define HYBRID_CONTROL_BYTES 4096u
+#define HYBRID_CMD_RUN 1u
+#define HYBRID_CMD_STOP 2u
+#define HYBRID_STATUS_READY 1u
+#define HYBRID_STATUS_RUNNING 2u
+#define HYBRID_STATUS_GRAD_READY 3u
+#define HYBRID_STATUS_STOPPED 4u
+#define HYBRID_STATUS_ERROR 255u
+typedef struct {
+    char magic[8];
+    uint32_t version, bytes, command, status, generation, microsteps;
+    uint64_t record_base;
+} HybridControl;
+_Static_assert(sizeof(HybridControl) == 40, "hybrid control layout changed");
 
 // Globals
 static Class g_D, g_I, g_AR, g_AIO;
@@ -209,17 +250,17 @@ static LayerActs layer_acts_alloc(void) {
     a.layer_in=(float*)jishui_aligned_malloc(SEQ*DIM*4);
     a.xnorm=(float*)jishui_aligned_malloc(SEQ*DIM*4);
     a.Q=(float*)jishui_aligned_malloc(SEQ*Q_DIM*4); a.K=(float*)jishui_aligned_malloc(SEQ*KV_DIM*4); a.V=(float*)jishui_aligned_malloc(SEQ*KV_DIM*4);
-    a.attn_out=(float*)jishui_aligned_malloc(SEQ*Q_DIM*4); a.o_out=(float*)jishui_malloc(SEQ*DIM*4);
+    a.attn_out=(float*)jishui_aligned_malloc(SEQ*Q_DIM*4);
     a.x2=(float*)jishui_aligned_malloc(SEQ*DIM*4); a.x2norm=(float*)jishui_aligned_malloc(SEQ*DIM*4);
     a.h1=(float*)jishui_aligned_malloc(SEQ*HIDDEN*4); a.h3=(float*)jishui_aligned_malloc(SEQ*HIDDEN*4);
-    a.silu_out=(float*)jishui_aligned_malloc(SEQ*HIDDEN*4); a.ffn_out=(float*)jishui_malloc(SEQ*DIM*4);
+    a.silu_out=(float*)jishui_aligned_malloc(SEQ*HIDDEN*4);
     return a;
 }
 static void layer_acts_free(LayerActs *a) {
     free(a->layer_in);free(a->xnorm);
     free(a->Q);free(a->K);free(a->V);
-    free(a->attn_out);free(a->o_out);free(a->x2);free(a->x2norm);
-    free(a->h1);free(a->h3);free(a->silu_out);free(a->ffn_out);
+    free(a->attn_out);free(a->x2);free(a->x2norm);
+    free(a->h1);free(a->h3);free(a->silu_out);
 }
 static LayerGrads layer_grads_alloc(void) {
     LayerGrads g;

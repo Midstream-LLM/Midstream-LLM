@@ -1,5 +1,35 @@
 # ANE + Metal probes
 
+## MLX-owned mixed training
+
+The production coordinator is `src/jishui/train_hybrid.py`. MLX owns AdamW,
+validation, sampler state, and the ordinary MLX checkpoint format. The MLX GPU
+and native ANE worker consume disjoint microbatches from the same optimizer
+step, then MLX combines their fp32 gradients by sample count.
+
+The fp16 path requires global loss scaling. `configs/jishui-200m-mlx.json`
+sets `loss_scale=256`; MLX unscales into fp32 before accumulation, while the
+native worker applies the same global scale plus the validated local backward
+scales. On the real step-7200 checkpoint, the two-record ANE average matched
+MLX with cosine `0.9996683` and relative L2 `2.5846%`.
+
+Run a fail-closed one-update gate first:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m jishui.train_hybrid \
+  --config configs/jishui-200m-mlx.json \
+  --data-dir dataset/processed \
+  --run-dir runs/jishui-200m-stage0-1b \
+  --resume latest --generations 1 --no-save-final \
+  --mlx-microsteps 6 --ane-microsteps 2 --gradient-shadow \
+  --metal-norm --metal-silu --metal-io
+```
+
+`--gradient-shadow` aborts before the optimizer update unless full-gradient
+cosine is at least `0.999` and relative L2 is at most `5%`. After it passes,
+remove `--generations 1 --no-save-final --gradient-shadow` for the long run.
+The native QKV fusion flag remains off.
+
 This directory contains bounded benchmarks used to choose the GPU boundary for
 `training_dynamic/train.m`.  They use Jishui-200M's real dimensions, page-aligned
 host allocations, `MTLResourceStorageModeShared`, and CPU reference checks.
@@ -42,8 +72,9 @@ end-to-end microstep is the deciding measurement.
 
 `MPSMatrixMultiplication` is therefore not used in the trainer: Accelerate's
 fp32 GEMM is faster at these shapes, even though the MPS results are bitwise
-equal and the buffers are genuinely no-copy.  The retained GPU boundary is the
-custom Metal LayerNorm and SiLU kernels.
+equal and the buffers are genuinely no-copy. The retained GPU boundary is the
+custom Metal LayerNorm and SiLU kernels plus direct conversion of selected ANE
+IOSurface outputs.
 
 ## Integrated backend
 
@@ -56,21 +87,27 @@ make MODEL=jishui_200m_2048
   --index /private/tmp/jishui_ane_train.index \
   --data-dir /Volumes/PS2000/LLM/Jishui/dataset/processed \
   --steps 2 --accum 2 --no-checkpoint \
-  --metal-norm --metal-silu
+  --metal-norm --metal-silu --metal-io
 ```
 
 The resulting heterogeneous split is:
 
 - ANE: transformer forward, attention backward, and activation-gradient GEMMs;
-- Metal GPU: LayerNorm forward/backward and fused SiLU backward;
+- Metal GPU: LayerNorm forward/backward, fused SiLU backward, and direct fp16
+  ANE output conversion/packing at the SDPA and fused-FFN boundaries;
 - CPU/Accelerate: classifier, softmax, weight-gradient GEMMs, AdamW, sampling,
   and orchestration.
 
 This is operator-level heterogeneous training on one SoC, not replicated-model
-data parallelism.  `--metal-shadow` enables the Metal LayerNorm path and checks
-every real invocation against the CPU implementation; it aborts on a failed
-tolerance gate. `--parity-report FILE` writes compact JSONL probes for comparing
-loss, gradients, weights and Adam state without a full checkpoint.
+data parallelism. `--metal-io` wraps page-aligned IOSurface memory as shared
+Metal buffers without a staging allocation. One kernel converts SDPA output to
+the fp32 backward cache while copying its fp16 attention slice into the
+already-weighted Wo input; a second converts the fused FFN output to its fp32
+caches. `--metal-shadow` enables the Metal LayerNorm and I/O paths and checks
+every real invocation against the CPU implementation; add `--metal-silu` to
+cover SiLU backward too. It aborts on a failed tolerance gate.
+`--parity-report FILE` writes compact JSONL probes for comparing loss,
+gradients, weights and Adam state without a full checkpoint.
 
 The production-length `--metal-shadow` run checked every integrated LayerNorm
 and SiLU invocation against the CPU reference and completed a real-index Adam
@@ -78,6 +115,17 @@ update with `accum=2`. Metal and CPU are tolerance-equivalent rather than
 bitwise equal: on the first index-sampled step the losses were `10.4381294` and
 `10.4381037`. This is the expected effect of a different floating-point
 reduction order; the shadow gate rejects larger local errors.
+
+The `SEQ=2048` Metal-I/O shadow gate on 2026-08-09 completed one Adam update
+over a fixed 2049-token record. All 30 SDPA and FFN conversions had zero
+difference from their fp16 CPU references, and all SDPA-to-Wo packs were
+bitwise exact. In a same-seed CPU-I/O versus `--metal-io` A/B, every reported
+loss, gradient, clipping, updated-weight, and Adam-moment probe was exactly
+equal. The one-step train times were 6.6280 s and 6.3168 s (4.7% lower total
+in that pair); this difference came from variance outside the new boundary,
+while the forward-I/O bucket itself increased from 162.6 ms to 222.2 ms. This
+is only a correctness gate; it does not establish a Metal-I/O or sustained
+speedup.
 
 After the token-major classifier and bounded dW queue changes, a cool-state
 paired bounded-record run measured **5.6265 s** for ANE+CPU and **4.0101 s** for
@@ -94,6 +142,13 @@ differed by `7.4e-4` relative and the sampled weights by at most `1.41e-5`
 absolute. Under live MLX plus heavy swap, a previous corrected production-shape
 gate was effectively tied at 20.654 s versus 20.467 s. Treat all of these as
 short correctness/performance gates, not stable overnight throughput.
+
+The MHA-only QKV backward fusion was also tested after moving the fp16
+`dx_k + dx_v` add into MIL and reducing the output from three planes to two.
+All 30 shadow comparisons were bitwise exact, but a bracketed five-microstep
+run measured split A `3.7618`, fused `3.7731`, split B `3.7156 s/step` after
+discarding each segment's step 0. The fused path was about 0.9% slower than the
+two split means, so `--npu-fuse-qkv-bwd` remains default-off.
 
 Running a complete model replica on each accelerator is deliberately out of
 scope for this host. It would duplicate training state in 24 GB unified memory,
