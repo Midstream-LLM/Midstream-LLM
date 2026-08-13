@@ -45,3 +45,6 @@ env/
 /dataset/processed.7z
 /dataset/reports/pipeline/logs/
 /session-ses_02dc.md
+
+# Local runtime secrets
+/.webui_secret_key
