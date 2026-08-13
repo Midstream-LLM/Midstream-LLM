@@ -1,10 +1,10 @@
-# HANDOFF — Jishui 数据管线完成，MLX Stage 0 已落地（2026-08-09）
+# HANDOFF — Jishui 数据管线完成，MLX Stage 0 已落地（2026-08-11）
 
 > 本文件是给下一个 agent 的交接说明。先读 `AGENTS.md`、本文件、`dataset/processed/README.md`、`docs/data-production-run.md`，再动手。
 
 ## 1. 当前状态（一句话）
 
-Jishui 古汉语预训练**数据生产管线已全量跑通并冻结**（2026-08-07）：inventory → clean → 五级去重 → 作品级 split → tokenize（ccc-bbpe-32k，21 shard，**41.55 亿 tokens**）→ 15 项统计 → 采样权重。MLX 本机训练链路已落地并验证（200M MHA + RoPE + SwiGLU + LayerNorm、mmap sampler、梯度累积、`mx.compile`、验证、checkpoint/resume），但本机正式进程已由用户停止，不要自动重启。Apple ANE 路径已实现 ANE+Metal+CPU 算子级异构训练并通过真实 shard 的 forward/backward/Adam gate；短测提速随热与换页状态从近乎持平到约 **1.40x**，尚无稳定长跑结论。完整 4.1B train-token 训练仍应迁移到 V100/A800。
+Jishui 古汉语预训练**数据生产管线已全量跑通并冻结**（2026-08-07）：inventory → clean → 五级去重 → 作品级 split → tokenize（ccc-bbpe-32k，21 shard，**41.55 亿 tokens**）→ 15 项统计 → 采样权重。MLX 本机训练链路已落地并验证（200M MHA + RoPE + SwiGLU + LayerNorm、mmap sampler、梯度累积、`mx.compile`、验证、checkpoint/resume），正式进程已由用户暂停，最新完整 checkpoint 是 `step_00007200`；不要自动重启。MLX+ANE 混合路径现已通过真实 checkpoint 的梯度一致性、一步保存和再次恢复 gate，可以从 `7200` 启动受控训练；尚无稳定 overnight 加速结论。完整 4.1B train-token 训练仍应迁移到 V100/A800。
 
 ## 2. 最终产物（训练直接可用）
 
@@ -55,12 +55,30 @@ Jishui 古汉语预训练**数据生产管线已全量跑通并冻结**（2026-0
 
 ## 6. 下一步任务（当前训练阶段）
 
-1. MLX 本机链路到此收口，不要自动继续实验或重启训练。正式配置仍是 `max_steps=61036`（约 1B tokens）、`save_interval=400`、`max_checkpoints=3`、`optimizer_checkpoints=3`；以后最近三份都会保留模型、Adam 和训练状态。
-2. MLX trainer 和 retention sidecar 当前均未运行。现存 `2000` 是历史 model-only checkpoint，`2400`、`2800` 是完整 checkpoint；应从最新的 `2800` 精确恢复。`2000` 的 optimizer 无法补造，等未来产生 `3200` 后，保留窗口才会自然变成三份完整 checkpoint。本机稳态约 **1,261 tok/s**；0.1B ≈ 0.92 天，1B ≈ 9.2 天，4,119,474,408 个可用 train tokens ≈ 37.8 天理论值。
+1. 正式训练当前由用户暂停；不要自动重启。正式配置是 `max_steps=61036`（约 1B tokens）、`save_interval=400`、`max_checkpoints=3`、`optimizer_checkpoints=3`；现有最近三份完整 checkpoint 为 `6400/6800/7200`，都会保留模型、Adam 和训练状态。`step 0–7200` 使用了未 loss-scale 的 fp16 MLX backward；现已修正为 `loss_scale=256`、fp32 解缩放/累积、更新前按参数 dtype 转回。继续训练会以 `7200` 为明确的梯度语义切换点。
+2. 修正前纯 MLX 冷机曾测约 **1,261 tok/s**，持续运行会因无风扇散热降到约 700–900 tok/s。修正 loss scaling 后的热机短测为纯 MLX 约 **1,206 tok/s**；`6 MLX + 2 ANE` 三步为约 **1,312 / 1,210 / 1,142 tok/s**，平均只比同一热状态纯 MLX高约 1%，不能宣称稳定加速。checkpoint 从最新完整状态恢复；历史 model-only checkpoint 的 Adam moments 无法补造。
 3. **60 天不是 24GB 内存问题，而是本机 Metal 算力/持续降频问题。** 若目标是完整 4.1B train-token 预训练，迁移到持续可用的 8×V100 32G 或短时 A800；V100 路径用 fp16 + `torch.cuda.amp` + `GradScaler`，600M/1.5B 用 DDP + grad checkpoint。
 4. MLX 链路已包含 sampler、模型、验证和 checkpoint/resume；PyTorch V100 训练脚本仍需另行实现，新增依赖写 `requirements.txt`。
 5. ANE 入口在 `native/ane/training_dynamic/`：`scripts/export_ane_index.py` 导出索引，`./train --index ... --data-dir ...` 在线 mmap 21 个 NPY shard；checkpoint v6 原子写入并只保留最近 3 份，保存 accumulation、warmup、LR/Adam/clip/loss-scale 等恢复关键配置，旧 v5（含错误 residual 实验）会被拒绝。`--warmup` 单位是 optimizer update，末尾 partial accumulation 已正确按有效 microstep 数归一化；短测必须用 `--no-checkpoint`。当前 NPY/index 是 uint16 token 格式，因此 151,936 词表的 Qwen3 reference header 会在编译期明确拒绝，不能拿来做实际 GQA 训练。
 6. ANE+GPU 使用 `make MODEL=jishui_200m_2048` 后加 `--metal-norm --metal-silu`。映射为 ANE transformer/attention+dx、Metal LayerNorm/SiLU、CPU classifier/softmax/dW/Adam；这是单 SoC 算子级异构，不是 DDP。token-major classifier 与有界 dW 队列落地后，冷机配对为 **5.6265s → 4.0101s（1.40x）**；另一次真实 index 三更新 gate 为 **5.555s → 4.680s（15.8%）**，第三步 loss 相对差 `7.4e-4`、采样权重最大绝对差 `1.41e-5`。重 swap 场景曾只有 20.654s → 20.467s，不能据短测推算 overnight 吞吐。逐算子 LayerNorm/SiLU shadow gate 已通过；MPS classifier/dW GEMM 比 Accelerate 慢，且现有异步 CPU dW 可隐藏，未接入 GPU。完整模型双副本 data parallel 会复制训练状态并争用统一内存/散热，不建议在这台 24GB 无风扇 Mac 上继续实现。
+
+7. NPU 优化已完成 runtime 验证：删除 SDPA dead output、激活内存清理、MHA 固定 shape、RoPE 反向表、tied embedding 复用、IOSurface 批量映射、Adam/转置 staging 合并等默认路径均已构建和 gate。严格逐层 native mixed-precision VJP 在 `src/jishui/ane_reference.py`，checker 在 `src/jishui/check_ane_gradients.py`；step-7200 的 8 条真实 sampler 记录共 16,384 tokens、200,224,640 个导出梯度全部 finite。Jishui-200M/2048 使用模型 profile `ffn/ffn-w13/wo/sdpa/qkv=128/32/128/256/128`。
+8. QKV backward 两输出 fusion 已过精度 gate：MIL 内 fp16 合并 `dx_k+dx_v`，30 层 shadow 对 split 全部 `max_dx_diff=0`；严格 checker 为 relative L2 `3.44296%`、cosine `0.999408`。但五步配对 `split A/fused/split B=3.7618/3.7731/3.7156 s`，fused 比两侧 split 均值慢约 `0.9%`，所以 `--npu-fuse-qkv-bwd` 继续默认关闭。
+9. hybrid mmap 协议和 `src/jishui/train_hybrid.py` 已接通：MLX 持有 Adam/checkpoint，MLX GPU 与 ANE worker 分摊同一 optimizer step 的 8 个 microbatch，再按样本数做 fp32 梯度平均。此前 cosine 只有 `0.816` 的根因是 MLX fp16 backward 没有 loss scaling；修正后单 ANE 样本为 cosine `0.9997075`、relative L2 `2.4297%`，双 ANE 样本平均为 `0.9996683` / `2.5846%`。`--gradient-shadow` 现在默认以 cosine `>=0.999`、relative L2 `<=5%` fail closed。临时 `step_00007201` 已保存完整模型/Adam/sampler，并成功恢复到内存中的 `7202`；正式 checkpoint 仍未修改。
+
+正式启动前可先跑一更新、禁止保存的硬 gate：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m jishui.train_hybrid \
+  --config configs/jishui-200m-mlx.json \
+  --data-dir dataset/processed \
+  --run-dir runs/jishui-200m-stage0-1b \
+  --resume latest --generations 1 --no-save-final \
+  --mlx-microsteps 6 --ane-microsteps 2 --gradient-shadow \
+  --metal-norm --metal-silu --metal-io
+```
+
+通过后去掉 `--generations 1 --no-save-final --gradient-shadow` 即为当前建议的正式混合训练入口。QKV fusion 继续关闭。外置 ExFAT 必须保持挂载；`/private/tmp` 工作文件可在重启后消失并自动重建。
 
 ## 7. 约束（AGENTS.md）
 
@@ -78,4 +96,6 @@ Jishui 古汉语预训练**数据生产管线已全量跑通并冻结**（2026-0
 - `dataset/reports/pipeline/report.md`（15 项统计 + 人工审核清单）
 - `native/ane/README.md` / `native/ane/hybrid/README.md`（ANE+Metal 运行方式、A/B 与限制）
 - `docs/ane-issues-47-49.md`（issue #47/#49 对混合训练的适用性与本机 panic 结论）
+- `docs/npu-optimizations/00-overview.md` / `tutorial.md`（本轮 NPU 优化、开关与验收顺序）
+- `docs/npu-optimizations/08-adam-transpose.md`（Adam 更新与 ANE 权重转置合并）
 - `session-ses_02dc.md`（上一轮 OpenCode 会话记录，含大量调试上下文）

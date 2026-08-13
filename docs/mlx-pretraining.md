@@ -46,7 +46,7 @@ PYTHONPATH=src python -m jishui.train_mlx \
   --max-steps 10000
 
 # 本机建议的 1B-token Stage 0 预算（seq_len=2048 时约 61,036 steps）。
-# 以当前实测吞吐约 9.2 天理论值，实际按 10–12 天预留。
+# 冷机 1,261 tok/s 时约 9.2 天；长期 700–900 tok/s 时约 13–17 天。
 PYTHONPATH=src python -m jishui.train_mlx \
   --config configs/jishui-200m-mlx.json \
   --data-dir dataset/processed \
@@ -54,11 +54,11 @@ PYTHONPATH=src python -m jishui.train_mlx \
   --max-steps 61036
 ```
 
-正式 Stage 0 配置的默认值是 `seq_len=2048`、`batch_size=1`、`grad_accum_steps=8`、fp16、单 microbatch `mx.compile`，且关闭 gradient checkpointing。本机是 24GB RAM；该配置实测不开 checkpoint 峰值约 6.7 GiB，因此单独运行时不需要 gradient checkpointing。每 `400` 个 optimizer steps 保存一次，代码和配置只保留最近 `3` 份，并让新生成的三份都包含 `model.safetensors`、`optimizer.npz` 和 `train_state.json`。MLX 正式进程和 retention sidecar 当前均已停止，本机不会自动重启；历史 `step_00002000` 是 model-only，`2400`、`2800` 可精确恢复。更长序列、更大 batch 或后续 600M/1.5B 仍应重新评估。MLX/Metal 不受 V100 的 bf16 限制；当前 fp16 Adam 的 `eps=1e-5` 已显式配置，避免 `1e-8` 下溢导致 NaN。
+正式 Stage 0 配置的默认值是 `seq_len=2048`、`batch_size=1`、`grad_accum_steps=8`、fp16、`loss_scale=256`、单 microbatch `mx.compile`，且关闭 gradient checkpointing。scaled fp16 backward 的结果先转成 fp32 解缩放并完成 microbatch 累积/裁剪，送入现有 fp16 Adam 前再转回参数 dtype。本机是 24GB RAM；该配置不开 checkpoint 的既有峰值约 6.7 GiB，新增 fp32 梯度累积仍有余量，因此不需要 gradient checkpointing。每 `400` 个 optimizer steps 保存一次，代码和配置只保留最近 `3` 份，并让新生成的三份都包含 `model.safetensors`、`optimizer.npz` 和 `train_state.json`。正式进程当前由用户暂停，最新完整 checkpoint 是 `step_00007200`；不要自动重启。`step 0–7200` 使用旧的未 loss-scaled fp16 backward，从该点恢复后会切换到修正后的梯度语义。MLX/Metal 不受 V100 的 bf16 限制；fp16 Adam 的 `eps=1e-5` 已显式配置，避免 `1e-8` 下溢导致 NaN。
 
 ## 训练预算（本机实测）
 
-seq 2048、batch 1、gradient accumulation 8、fp16、单 microbatch `mx.compile`、不开 gradient checkpointing 时，稳定吞吐约 **1,261 tok/s**。下面是按此稳态速度的理论值，未计入降频、验证和 checkpoint I/O：
+旧的未 loss-scaled 路径冷机曾测约 **1,261 tok/s**；修正后的纯 MLX 在已经热机的三更新 gate 为约 **1,206 tok/s**。长时间运行仍会因无风扇降频进一步下降。下面的时间表继续以 1,261 tok/s 作为历史乐观上界，未计入降频、验证和 checkpoint I/O，正式预算应预留更多时间：
 
 | 预算 | 训练 tokens | 理论耗时 |
 |---|---:|---:|
@@ -81,7 +81,7 @@ PYTHONPATH=src python -m jishui.train_mlx \
   --resume latest
 ```
 
-每个 checkpoint 保存 `model.safetensors`、`optimizer.npz`、`train_state.json`（包含 sampler RNG 状态和已见 tokens），可恢复模型、Adam 和数据位置。正式配置的 `max_checkpoints=3`、`optimizer_checkpoints=3` 会自动只保留最近 3 份，并让新生成的三份都支持精确恢复。历史 `step_00002000` 的 optimizer 已被删除且无法重建；等 `step_00003200` 生成后，保留窗口才会全部是完整 checkpoint。ExFAT 上不使用 Python 3.12 的 fd-relative `shutil.rmtree`，项目采用路径式删除以避免 pruning 失败。
+每个 checkpoint 保存 `model.safetensors`、`optimizer.npz`、`train_state.json`（包含 sampler RNG 状态和已见 tokens），可恢复模型、Adam 和数据位置。正式配置的 `max_checkpoints=3`、`optimizer_checkpoints=3` 会自动只保留最近 3 份，并让三份都支持精确恢复。当前保留窗口是 `step_00006400/00006800/00007200`，均为完整 checkpoint。ExFAT 上不使用 Python 3.12 的 fd-relative `shutil.rmtree`，项目采用路径式删除以避免 pruning 失败。
 
 ## 实现边界
 
@@ -118,6 +118,30 @@ full-vocab softmax、dW 和 AdamW 仍在 CPU。这是同一 SoC 上的算子级
 ANE+GPU+CPU 异构训练，不是模型副本数据并行。Jishui-200M 当前是 MHA
 （`num_key_value_heads=11`），虽然内核保留 GQA 支持，但不能把 GQA 的节省
 外推到这个模型。
+
+MLX-owned 混合训练已经通过 step-7200 的真实梯度和 checkpoint/resume gate。MLX GPU 与 ANE worker 分摊 8 个 microbatch，MLX 继续独占 AdamW、验证和 checkpoint：
+
+```bash
+# 一步 fail-closed 梯度 gate，不保存正式 checkpoint
+PYTHONPATH=src .venv/bin/python -m jishui.train_hybrid \
+  --config configs/jishui-200m-mlx.json \
+  --data-dir dataset/processed \
+  --run-dir runs/jishui-200m-stage0-1b \
+  --resume latest --generations 1 --no-save-final \
+  --mlx-microsteps 6 --ane-microsteps 2 --gradient-shadow \
+  --metal-norm --metal-silu --metal-io
+
+# gate 通过后正式运行
+PYTHONPATH=src .venv/bin/python -m jishui.train_hybrid \
+  --config configs/jishui-200m-mlx.json \
+  --data-dir dataset/processed \
+  --run-dir runs/jishui-200m-stage0-1b \
+  --resume latest \
+  --mlx-microsteps 6 --ane-microsteps 2 \
+  --metal-norm --metal-silu --metal-io
+```
+
+单 ANE 样本 shadow 为 cosine `0.9997075`、relative L2 `2.4297%`；双 ANE 样本平均为 `0.9996683` / `2.5846%`。热机三步吞吐约 `1312 / 1210 / 1142 tok/s`，同一热状态纯 MLX 为约 `1206 tok/s`，目前只能认为性能近似持平，不能外推为稳定 overnight 加速。
 
 先导出约 34MB 的文档索引，再在线 mmap 原始 NPY shard：
 
