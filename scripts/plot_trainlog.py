@@ -23,7 +23,8 @@ TRAIN_RE = re.compile(
 )
 VALIDATION_RE = re.compile(
     rf"^{TIMESTAMP} .*: validation step=(?P<step>\d+) "
-    r"loss=(?P<loss>[-+0-9.eE]+) ppl=(?P<ppl>[-+0-9.eE]+)$"
+    r"loss=(?P<loss>[-+0-9.eE]+) ppl=(?P<ppl>[-+0-9.eE]+)"
+    r"(?: per_category=(?P<per_category>.*))?$"
 )
 ANY_TIMESTAMP_RE = re.compile(rf"^{TIMESTAMP}")
 
@@ -46,6 +47,7 @@ class ValidationPoint:
     step: int
     loss: float
     ppl: float
+    per_category: dict[int, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -92,11 +94,23 @@ def parse_log(path: Path) -> tuple[list[TrainPoint], list[ValidationPoint], date
 
             match = VALIDATION_RE.match(line)
             if match:
+                per_category: dict[int, float] | None = None
+                raw_categories = match.group("per_category")
+                if raw_categories:
+                    per_category = {}
+                    for token in raw_categories.split():
+                        if token.startswith("c") and "=" in token:
+                            key, _, value = token[1:].partition("=")
+                            try:
+                                per_category[int(key)] = float(value)
+                            except ValueError:
+                                continue
                 point = ValidationPoint(
                     timestamp=parse_timestamp(match.group("timestamp")),
                     step=int(match.group("step")),
                     loss=float(match.group("loss")),
                     ppl=float(match.group("ppl")),
+                    per_category=per_category,
                 )
                 validation_by_step[point.step] = point
                 continue
@@ -363,7 +377,7 @@ def draw_dashboard(
         summary["validation_loss"] = latest_validation.loss
         summary["validation_ppl"] = latest_validation.ppl
 
-    svg = Svg(1800, 1080)
+    svg = Svg(1800, 1450)
     svg.text(72, 53, "Jishui 200M Stage 0 - Training Snapshot", "title")
     svg.text(72, 82, f"Source: {log_path}", "subtitle")
 
@@ -520,9 +534,58 @@ def draw_dashboard(
         text_anchor="end",
     )
 
+    category_panel = Panel(60, 1060, 1680, 300)
+    draw_panel(svg, category_panel, "Validation perplexity by category")
+    category_series: dict[int, list[tuple[int, float]]] = {}
+    for point in validation:
+        if point.per_category:
+            for category, category_ppl in point.per_category.items():
+                category_series.setdefault(category, []).append((point.step, category_ppl))
+    if category_series:
+        category_colors = ["#1769aa", "#d45b27", "#147d64", "#6941a5", "#b45309", "#c21f3a"]
+        category_names = {
+            1: "c1 经史子集",
+            2: "c2 小说笔记",
+            3: "c3 诗词",
+            4: "c4 佛道医",
+            5: "c5 晚清民国",
+            6: "c6 知识公共",
+        }
+        all_category_ppl = [ppl for series in category_series.values() for _, ppl in series]
+        category_min = max(0.0, min(all_category_ppl) * 0.9)
+        category_max = max(all_category_ppl) * 1.08
+        cx, cy = draw_axes(
+            svg,
+            category_panel,
+            0,
+            max(steps),
+            category_min,
+            category_max,
+            y_formatter=lambda value: f"{value:.0f}",
+        )
+        for category in sorted(category_series):
+            color = category_colors[(category - 1) % len(category_colors)]
+            points = [(cx(step), cy(ppl)) for step, ppl in category_series[category]]
+            svg.polyline(points, fill="none", stroke=color, stroke_width=2.5)
+            for x, y in points:
+                svg.circle(x, y, 3.5, fill=color, stroke="#ffffff", stroke_width=1)
+        legend_x = category_panel.plot_x
+        for index, category in enumerate(sorted(category_series)):
+            x = legend_x + index * 245
+            color = category_colors[(category - 1) % len(category_colors)]
+            svg.line(x, category_panel.y + 27, x + 28, category_panel.y + 27, stroke=color, stroke_width=3)
+            svg.text(x + 34, category_panel.y + 32, category_names[category], "legend")
+    else:
+        svg.text(
+            category_panel.plot_x,
+            category_panel.y + 70,
+            "no per-category data (older log format)",
+            "label",
+        )
+
     svg.text(
         60,
-        1060,
+        1420,
         f"Progress {100 * progress:.2f}% | ETA at observed wall rate: {format_duration(remaining_seconds)} | "
         f"reported throughput median: {statistics.median(throughputs):.0f} tok/s",
         "subtitle",
