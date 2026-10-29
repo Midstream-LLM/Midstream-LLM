@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse an MLX training log and render a dependency-free SVG dashboard."""
+"""Parse an MLX or CUDA training log and render a dependency-free SVG dashboard."""
 
 from __future__ import annotations
 
@@ -19,12 +19,15 @@ TRAIN_RE = re.compile(
     rf"^{TIMESTAMP} .*: step=(?P<step>\d+) "
     r"loss=(?P<loss>[-+0-9.eE]+) ppl=(?P<ppl>[-+0-9.eE]+) "
     r"lr=(?P<lr>[-+0-9.eE]+) grad_norm=(?P<grad>[-+0-9.eE]+) "
-    r"tokens=(?P<tokens>\d+) tok/s=(?P<tok_s>[-+0-9.eE]+)$"
+    r"tokens=(?P<tokens>\d+) tok/s=(?P<tok_s>[-+0-9.eE]+)(?:\s+.*)?$"
 )
 VALIDATION_RE = re.compile(
     rf"^{TIMESTAMP} .*: validation step=(?P<step>\d+) "
     r"loss=(?P<loss>[-+0-9.eE]+) ppl=(?P<ppl>[-+0-9.eE]+)"
     r"(?: per_category=(?P<per_category>.*))?$"
+)
+RESUME_RE = re.compile(
+    rf"^{TIMESTAMP} .*: resumed(?:=.*| .* at) step=(?P<step>\d+) tokens=\d+(?:\s+.*)?$"
 )
 ANY_TIMESTAMP_RE = re.compile(rf"^{TIMESTAMP}")
 
@@ -76,6 +79,18 @@ def parse_log(path: Path) -> tuple[list[TrainPoint], list[ValidationPoint], date
             if timestamp_match:
                 timestamp = parse_timestamp(timestamp_match.group("timestamp"))
                 first_timestamp = min(first_timestamp, timestamp) if first_timestamp else timestamp
+
+            resume_match = RESUME_RE.match(line)
+            if resume_match:
+                resume_step = int(resume_match.group("step"))
+                # A resume rolls the run back to the saved checkpoint.  Drop
+                # any points beyond that step from the previous branch so the
+                # dashboard does not show abandoned future history as latest.
+                for step in [step for step in train_by_step if step > resume_step]:
+                    del train_by_step[step]
+                for step in [step for step in validation_by_step if step > resume_step]:
+                    del validation_by_step[step]
+                continue
 
             match = TRAIN_RE.match(line)
             if match:

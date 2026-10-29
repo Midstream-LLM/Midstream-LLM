@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ModuleNotFoundError as exc:
+    if exc.name not in {"mlx", "mlx.core"}:
+        raise
+    raise unittest.SkipTest("requires Apple Silicon MLX") from exc
 from mlx.utils import tree_flatten
 
 from jishui.config import ModelConfig

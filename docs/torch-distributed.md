@@ -1,6 +1,8 @@
 # PyTorch 分布式训练后端
 
-状态：后端探测、`torchrun` rank/device 规划和 collective smoke 已落地；PyTorch 模型与正式 pretraining loop 尚未接入。本页不涉及 MLX 训练。
+状态（2026-10-02）：后端探测、`torchrun` rank/device 规划和 collective smoke 已落地；
+单卡 CUDA 模型与 pretraining loop 已在 `jishui.pretrain_torch` 实现，见 `cuda-continuation.md`。
+多卡正式训练尚未接入；本文的 `jishui.train_torch` 命令仍只负责 runtime 检查。
 
 ## 1. “NPU + GPU 分布式”的边界
 

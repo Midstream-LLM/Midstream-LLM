@@ -13,9 +13,15 @@ dependencies = [
   "tokenizers>=0.20",
 ]
 
+[project.optional-dependencies]
+torch = ["torch>=2.6,<2.7", "safetensors>=0.5,<1"]
+tracking = ["wandb>=0.30,<1"]
+
 [project.scripts]
+jishui-train-torch = "jishui.pretrain_torch:main"
 jishui-train-mlx = "jishui.train_mlx:main"
 jishui-generate-mlx = "jishui.generate_mlx:main"
+jishui-generate-torch = "jishui.generate_torch:main"
 jishui-torch-runtime = "jishui.train_torch:main"
 
 [tool.setuptools]

@@ -1,0 +1,234 @@
+{
+  "name": "jishui-classical-inference-suite",
+  "version": 1,
+  "created": "2026-10-03",
+  "description": "古汉语续写探针集。每个用例是一条古文前缀（无问答式指令），模型应续写而非回答。简体与繁体成对出现，同一 pair 的两种写法内容等义、字数相同，用于区分「繁体本身难」与「模型退化」。",
+  "usage": "PYTHONPATH=src .venv-torch/bin/python -m jishui.generate_torch --run-dir runs/jishui-200m-cuda-4b --checkpoint latest --prompt-file tests/prompts/classical-inference-suite.json --output-json runs/inference-suite/latest.json。本文件 defaults 里的采样参数只是参考值：命令行同名参数（--max-new-tokens/--temperature/--top-p/--top-k/--repetition-penalty/--seed）会覆盖它；per-case 的 max_new_tokens 优先于命令行。",
+  "criterion": [
+    "① prompt 必须能 tokenizer 往返（decode(encode(x)) == x）且不含 U+FFFD；runner 在开跑前强制检查，不通过即报错。",
+    "② 输出中不得出现文字内部的 U+FFFD 替换字符，不得泄漏未屏蔽的 special token（pad/unk/im_start/im_end），也不得一个 token 都没生成；命中即 flags，退出码非零。",
+    "③ 以下两类不是失败，记为 notes，需人工看：a) stop=length 时末字解成 U+FFFD——byte-level BPE 把多字节汉字切一半的截断伪影（2026-10-03 实测 p01-trad/p06-trad 均属此类）；b) stop=eod 且没有新增可见文本——模型判定该 prompt 已是完整文档，例如 p03-simp/p07-trad 在名句末尾直接收尾。",
+    "④ 每条输出记录 distinct_4gram（生成段的 4 字去重率）：生成段 ≥40 字且 <0.7 时附 low-distinctness 提示。这是启发式经验阈值，不是定律，只用来定位复读。",
+    "⑤ 简繁平行对的 prompt token 数比应在 1.0–1.7 之间（实测 CCC 语料所致）；超出说明分词或语料配比异常，runner 会当场标出。",
+    "⑥ 比较 checkpoint 时固定 --seed 与采样参数，并加 --temperature 0 做确定性对照；差异才有归因意义。",
+    "⑦ 本套用例是开放式探针，没有「正确答案」；判据只覆盖可自动检出的结构性失败（内部乱码、special token 泄漏、零 token），语义质量需人工判读。"
+  ],
+  "notes": [
+    "繁体 token 成本来自实测：同一段文字繁体写法吃 1.00–1.64× token（10 对平均 1.35），CCC 以简体为主。",
+    "CCC 点校本带现代标点（，。：），殆知阁多为无标点、全角空格 U+3000 缩进，两套版式都有覆盖。",
+    "空 prompt 会以 <|endoftext|> 冷启动，等于「从文档边界开始自由生成」，用于观察模型最自然的分布。",
+    "标为「自造」的用例是为覆盖句式和长度而构造的，不代表任何具体文献的原文，不要当作引文引用。"
+  ],
+  "defaults": {
+    "max_new_tokens": 48,
+    "temperature": 0.8,
+    "top_p": 0.9,
+    "top_k": 40,
+    "repetition_penalty": 1.05,
+    "repetition_window": 128,
+    "seed": 42
+  },
+  "cases": [
+    {
+      "id": "p01-simp",
+      "pair": "p01",
+      "script": "simplified",
+      "genre": "奏议",
+      "source": "自造（仿奏议体，无特定出处）",
+      "probe": "奏议体长句能否接住「贤君」主题而不断裂",
+      "prompt": "臣闻古之贤君，不以天下之乐为己乐，"
+    },
+    {
+      "id": "p01-trad",
+      "pair": "p01",
+      "script": "traditional",
+      "genre": "奏议",
+      "source": "自造（仿奏议体，无特定出处）",
+      "probe": "同上；与 p01-simp 的内容应保持等义续写",
+      "prompt": "臣聞古之賢君，不以天下之樂為己樂，"
+    },
+    {
+      "id": "p02-simp",
+      "pair": "p02",
+      "script": "simplified",
+      "genre": "诸子议论",
+      "source": "自造",
+      "probe": "哲理性对句，看是否落入「阴阳/天地」高频模板",
+      "prompt": "夫天地之道，阴阳相生，万物以成。"
+    },
+    {
+      "id": "p02-trad",
+      "pair": "p02",
+      "script": "traditional",
+      "genre": "诸子议论",
+      "source": "自造",
+      "probe": "同上",
+      "prompt": "夫天地之道，陰陽相生，萬物以成。"
+    },
+    {
+      "id": "p03-simp",
+      "pair": "p03",
+      "script": "simplified",
+      "genre": "诗",
+      "source": "杜甫《春望》首联",
+      "probe": "名句续写：能否衔接原诗下一联，还是直接跑偏",
+      "prompt": "国破山河在，城春草木深。"
+    },
+    {
+      "id": "p03-trad",
+      "pair": "p03",
+      "script": "traditional",
+      "genre": "诗",
+      "source": "杜甫《春望》首联",
+      "probe": "同上",
+      "prompt": "國破山河在，城春草木深。"
+    },
+    {
+      "id": "p04-simp",
+      "pair": "p04",
+      "script": "simplified",
+      "genre": "佛经",
+      "source": "《金刚经》开篇套语",
+      "probe": "佛经序分的高频套语，检验领域切换是否干净",
+      "prompt": "如是我闻：一时，佛在舍卫国祇树给孤独园，"
+    },
+    {
+      "id": "p04-trad",
+      "pair": "p04",
+      "script": "traditional",
+      "genre": "佛经",
+      "source": "《金刚经》开篇套语",
+      "probe": "同上；殆知阁佛藏本就是繁体，理论上应优于其他繁体用例",
+      "prompt": "如是我聞：一時，佛在舍衛國祇樹給孤獨園，"
+    },
+    {
+      "id": "p05-simp",
+      "pair": "p05",
+      "script": "simplified",
+      "genre": "医书",
+      "source": "《素问·上古天真论》",
+      "probe": "医经问答体，看是否续出「今时之人」对举结构",
+      "prompt": "黄帝问曰：余闻上古之人，春秋皆度百岁，"
+    },
+    {
+      "id": "p05-trad",
+      "pair": "p05",
+      "script": "traditional",
+      "genre": "医书",
+      "source": "《素问·上古天真论》",
+      "probe": "同上",
+      "prompt": "黃帝問曰：余聞上古之人，春秋皆度百歲，"
+    },
+    {
+      "id": "p06-simp",
+      "pair": "p06",
+      "script": "simplified",
+      "genre": "奏疏",
+      "source": "诸葛亮《出师表》",
+      "probe": "极高频名篇，理论上最可能原样续出下文",
+      "prompt": "臣亮言：先帝创业未半而中道崩殂，"
+    },
+    {
+      "id": "p06-trad",
+      "pair": "p06",
+      "script": "traditional",
+      "genre": "奏疏",
+      "source": "诸葛亮《出师表》",
+      "probe": "同上；与 p06-simp 直接比较文言记忆是否依赖字形",
+      "prompt": "臣亮言：先帝創業未半而中道崩殂，"
+    },
+    {
+      "id": "p07-simp",
+      "pair": "p07",
+      "script": "simplified",
+      "genre": "词",
+      "source": "苏轼《念奴娇·赤壁怀古》",
+      "probe": "词体换行与韵脚：看是否续出「故垒西边」",
+      "prompt": "大江东去，浪淘尽，千古风流人物。"
+    },
+    {
+      "id": "p07-trad",
+      "pair": "p07",
+      "script": "traditional",
+      "genre": "词",
+      "source": "蘇軾《念奴嬌·赤壁懷古》",
+      "probe": "同上",
+      "prompt": "大江東去，浪淘盡，千古風流人物。"
+    },
+    {
+      "id": "p08-simp",
+      "pair": "p08",
+      "script": "simplified",
+      "genre": "尺牍",
+      "source": "自造",
+      "probe": "书信敬语套式，看是否续出「伏惟」类定型句后收束",
+      "prompt": "某顿首再拜，伏惟尊候万福，"
+    },
+    {
+      "id": "p08-trad",
+      "pair": "p08",
+      "script": "traditional",
+      "genre": "尺牍",
+      "source": "自造",
+      "probe": "同上",
+      "prompt": "某頓首再拜，伏惟尊候萬福，"
+    },
+    {
+      "id": "p09-simp",
+      "pair": "p09",
+      "script": "simplified",
+      "genre": "易类",
+      "source": "《周易·说卦》句式；版式仿殆知阁（无标点、U+3000 缩进）",
+      "probe": "全角空格作段首缩进时不应被当成噪声；检验版式鲁棒性",
+      "prompt": "　　昔者圣人之作易也，将以顺性命之理，"
+    },
+    {
+      "id": "p09-trad",
+      "pair": "p09",
+      "script": "traditional",
+      "genre": "易类",
+      "source": "《周易·說卦》句式；版式仿殆知阁（无标点、U+3000 缩进）",
+      "probe": "同上",
+      "prompt": "　　昔者聖人之作易也，將以順性命之理，"
+    },
+    {
+      "id": "x01-empty",
+      "pair": "x01",
+      "script": "none",
+      "genre": "自由生成",
+      "source": "—",
+      "probe": "空 prompt 以 <|endoftext|> 冷启动，观察无条件下最自然的起手式",
+      "max_new_tokens": 96,
+      "prompt": ""
+    },
+    {
+      "id": "x02-mixed",
+      "pair": "x02",
+      "script": "mixed",
+      "genre": "注疏",
+      "source": "自造（四库本繁体 + 点校本简体混排，模拟语料真实来源混杂）",
+      "probe": "简繁混排是语料真实状态（殆知阁简繁混杂 + CCC 简体）；检验是否被字形切换打断",
+      "prompt": "欽定四庫全書本《漢書》卷一下，颜师古注，師古曰："
+    },
+    {
+      "id": "x03-long-simp",
+      "pair": "x03",
+      "script": "simplified",
+      "genre": "长前缀",
+      "source": "自造",
+      "probe": "约 50 字上下文：检验长前缀下的连贯度与复读倾向（无 KV cache，此处也顺带计时）",
+      "max_new_tokens": 64,
+      "prompt": "臣闻治天下者，必先审其本末，察其缓急，然后可以立政。今国家承累世之弊，"
+    },
+    {
+      "id": "x04-long-trad",
+      "pair": "x03",
+      "script": "traditional",
+      "genre": "长前缀",
+      "source": "自造",
+      "probe": "与 x03-long-simp 等义；繁体下同样长度会多占约 30–40% token，用于校核上下文截断边界",
+      "max_new_tokens": 64,
+      "prompt": "臣聞治天下者，必先審其本末，察其緩急，然後可以立政。今國家承累世之弊，"
+    }
+  ]
+}

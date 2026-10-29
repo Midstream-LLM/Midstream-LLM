@@ -1,4 +1,25 @@
-# HANDOFF — Jishui 数据管线完成，MLX Stage 0 已落地（2026-08-11）
+# HANDOFF — Jishui 200M CUDA 续训（2026-10-29 更新）
+
+最新状态：本地日志确认 2026-10-07 已完成 step 244,141 / 4,000,006,144 tokens，
+最终完整 checkpoint 为 `runs/jishui-200m-cuda-4b/checkpoints/step_00244141/`。
+当前训练入口与文件职责见 `README.md`；下方为迁移与早期训练记录。
+
+## 最新进展（优先于下方 8 月历史记录）
+
+- 已迁移到 Linux / RTX 3060 12GB，主机 NVIDIA 驱动正常；GPU 命令需有主机设备访问权限。
+- MLX 日志到 step 55,423；最近完整 checkpoint 为 **55,200 / 904,396,800 tokens**，保留原目录。
+- 用户已要求继续到**累计 4B tokens**，并选择 **cosine annealing with restarts**。
+- CUDA 模型、完整 MLX Adam 导入、训练循环、保存/恢复已实现；入口 `jishui.pretrain_torch`。
+- 三周期、峰值 `1e-4`、谷值 `1e-5`，首周期 1,000 步从恢复学习率缓升；后续重启保留 Adam。
+- 扩训采样改为按各类可用 tokens 比例，避免小类别长期过采样；原冻结数据文件不变。
+- `.venv-torch`：Python 3.12 venv + PyTorch 2.6.0/cu124。旧 `.venv` 是从 Mac 拷贝的环境。
+- 配置、启动、停止、验证和具体日程见 **`docs/cuda-continuation.md`**。
+- W&B 在线追踪已接入 `liangsidi-university-of-electronic-science-and-technolog/Jishui`；
+  run ID 保存在正式 run 的 `wandb_run.json`，恢复时复用。凭据由本机 SDK 管理，不写入项目文件。
+- 正式 run 使用 `runs/jishui-200m-cuda-4b/`。实际是否运行以 `trainer.pid`、进程和日志为准；
+  8 月记录中的“暂停/不要重启”描述的是当时的 Mac 训练，不代表本次用户授权后的状态。
+
+以下是 8 月 Mac / MLX / ANE 阶段的历史记录，硬件、路径及训练步数不代表当前 Linux 主机。
 
 > 本文件是给下一个 agent 的交接说明。先读 `AGENTS.md`、本文件、`dataset/processed/README.md`、`docs/data-production-run.md`，再动手。
 

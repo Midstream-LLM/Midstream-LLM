@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ModuleNotFoundError as exc:
+    if exc.name not in {"mlx", "mlx.core"}:
+        raise
+    raise unittest.SkipTest("requires Apple Silicon MLX") from exc
 from mlx.utils import tree_flatten
 
 from jishui.config import ModelConfig, TrainConfig

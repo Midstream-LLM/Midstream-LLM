@@ -1,6 +1,8 @@
-# AGENTS.md — Jishui（集水）
+# AGENTS.md — 击水（Jishui）· Midstream AI / 中流
 
 古汉语原生 LLM 从零预训练项目。读这一节之前，agent 不会知道这些事。
+
+> **命名**：模型名 **击水**，取自「到中流击水，浪遏飞舟」（毛泽东《沁园春·长沙》）；品牌 **Midstream-AI / 中流 AI**，口号「土法炼钢」（见 `logo/midstream-ai-*.svg`）。仓库目录与代码标识符沿用罗马字 `Jishui`（纯 ASCII，**不要改**——`checkpoints_torch.check_model_config()` 会比对 checkpoint 里的 `model.name`，改动会让既有 checkpoint 无法续训）。**不要写成「集水」**：那是 `Jishui` 拼音 jī/jí 混淆造成的历史误读，二者只差声调。
 
 ## 项目性质
 - **目标**：从零训练一个古汉语原生的小型 decoder-only LLM，先 ~600M，再 scale 到 ~1.5B。
@@ -72,3 +74,13 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 - 不要给 V100 路径开 bf16。
 - 不要 `git init` / 提交，除非用户明确要求。
 - 不要为后训练或 AI 编译器部分提前建代码——本阶段只管 pretraining。
+
+## 当前训练进展（2026-10-29，优先于上方旧待办）
+- 4B CUDA 训练已于 2026-10-07 完成：step 244,141 / 4,000,006,144 tokens；最终完整 checkpoint 为 `runs/jishui-200m-cuda-4b/checkpoints/step_00244141/`。本轮已结束，不自动重启。
+- `src/jishui/` 已落地，200M 在 MLX 训练到完整 checkpoint step 55,200（0.9044B tokens）。
+- 已实现单卡 CUDA 续训：`src/jishui/model_torch.py`、`pretrain_torch.py`、`checkpoints_torch.py`。
+- 当前 Linux + 3060 12GB；使用 `.venv-torch`（venv + pip），旧 `.venv` 为 Mac 环境。
+- 目标为累计 4B tokens；3 个余弦重启周期，峰值 1e-4、谷值 1e-5，首次 warmup 1000 步。
+- 参数主副本/Adam 为 fp32，计算用 fp16 AMP + GradScaler。配置见 `configs/jishui-200m-cuda-4b.json`。
+- CUDA 模型及完整状态迁移已验证；多卡正式 trainer 尚未接入，`train_torch.py` 仍是 runtime 探测入口。
+- 操作说明见 `docs/cuda-continuation.md`，正式产物在 `runs/jishui-200m-cuda-4b/`，保留原 MLX checkpoints。

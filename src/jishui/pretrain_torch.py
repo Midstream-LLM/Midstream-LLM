@@ -1,0 +1,297 @@
+"""Single-CUDA pretraining with full-state MLX import and bounded continuation."""
+from __future__ import annotations
+
+import argparse
+import copy
+import fcntl
+import json
+import logging
+import math
+import os
+import signal
+import time
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from .checkpoints import latest_checkpoint
+from .checkpoints_torch import import_mlx, load_checkpoint, save_checkpoint
+from .config import load_run_config
+from .data import PackedBatchIterator, SequentialBatchIterator, load_or_build_index, load_sampling_config
+from .model_torch import JishuiForCausalLM, causal_lm_loss
+from .schedules_torch import continuation_lr, make_continuation_schedule
+from .tracking import ExperimentTracker
+
+LOG = logging.getLogger("jishui.pretrain_torch")
+
+
+def natural_sampling(index) -> dict:
+    totals = index.token_totals("train")
+    total = sum(totals.values())
+    if total <= 0:
+        raise ValueError("empty training set")
+    return {"target_mix": {str(k): v / total for k, v in totals.items()}}
+
+
+def tensor_batch(batch, device):
+    tokens = torch.as_tensor(batch.astype(np.int64), device=device)
+    return tokens[:, :-1], tokens[:, 1:]
+
+
+@torch.no_grad()
+def evaluate(model, index, config, device, category=None) -> float:
+    model.eval()
+    iterator = SequentialBatchIterator(index, "val", config.seq_len, config.batch_size,
+                                       config.eod_token_id, category=category)
+    losses = []
+    for _ in range(config.eval_batches):
+        x, y = tensor_batch(next(iterator), device)
+        with torch.autocast("cuda", dtype=torch.float16):
+            loss = causal_lm_loss(model, x, y)
+        losses.append(float(loss))
+    model.train()
+    result = sum(losses) / len(losses)
+    if not math.isfinite(result):
+        raise FloatingPointError("non-finite validation loss")
+    return result
+
+
+def validation_report(model, index, config, device, step):
+    overall = evaluate(model, index, config, device)
+    categories = {}
+    for category in range(1, 7):
+        if np.any((index.splits == 1) & (index.categories == category)):
+            categories[category] = evaluate(model, index, config, device, category)
+    LOG.info("validation step=%d loss=%.4f ppl=%.2f per_category=%s", step, overall,
+             math.exp(overall), " ".join(f"c{k}={math.exp(v):.1f}" for k, v in categories.items()))
+    return {"step": step, "loss": overall, "per_category_loss": categories}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--data-dir", type=Path, default=Path("dataset/processed"))
+    parser.add_argument("--index-cache", type=Path, default=Path("runs/cache/pretrain_index_cuda.npz"))
+    parser.add_argument("--resume", required=True, help="MLX/CUDA checkpoint directory or latest")
+    parser.add_argument("--steps", type=int, help="stop and save after this many updates (smoke test)")
+    parser.add_argument("--evaluate-first", action="store_true")
+    parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--expected-val-loss", type=float)
+    parser.add_argument("--val-tolerance", type=float, default=0.03)
+    parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"),
+                        help="override tracking mode (default comes from config)")
+    return parser.parse_args()
+
+
+def run(args, tracker):
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        raise ValueError("this continuation trainer supports one CUDA GPU; do not launch with torchrun")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA unavailable; run in the host GPU environment")
+    if args.steps is not None and args.steps <= 0:
+        raise ValueError("--steps must be positive")
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+    torch.set_num_threads(4)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    raw = json.loads(args.config.read_text())
+    model_config, config = load_run_config(args.config)
+    if config.dtype != "float16":
+        raise ValueError("CUDA continuation currently requires float16 AMP")
+    if config.seq_len > model_config.max_position_embeddings or config.eval_batches < 1:
+        raise ValueError("invalid sequence length or evaluation batches")
+    continuation = raw["continuation"]
+    if continuation.get("schedule") not in {"cosine_from_imported_lr", "cosine_warm_restarts"}:
+        raise ValueError("unsupported continuation schedule")
+    target_tokens = int(continuation["target_tokens"])
+    step_tokens = config.seq_len * config.batch_size * config.grad_accum_steps
+    checkpoint = latest_checkpoint(args.run_dir) if args.resume == "latest" else Path(args.resume)
+    source_meta = json.loads((checkpoint / "train_state.json").read_text())
+    for name in ("seq_len", "batch_size", "grad_accum_steps", "eod_token_id", "beta1", "beta2", "adam_eps", "weight_decay", "grad_clip"):
+        if source_meta["training"][name] != getattr(config, name):
+            raise ValueError(f"continuation changed {name}; explicit migration is required")
+    torch.manual_seed(config.seed)
+    model = JishuiForCausalLM(model_config).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
+        betas=(config.beta1, config.beta2), eps=config.adam_eps, weight_decay=config.weight_decay, fused=True)
+    scaler = torch.amp.GradScaler("cuda", init_scale=config.loss_scale)
+    LOG.info("device=%s torch=%s parameters=%d", torch.cuda.get_device_name(), torch.__version__,
+             sum(p.numel() for p in model.parameters()))
+    native = (checkpoint / "training.pt").exists()
+    state = (load_checkpoint(checkpoint, model, optimizer, scaler) if native
+             else import_mlx(checkpoint, model, optimizer))
+    step, tokens_seen = int(state["step"]), int(state["tokens_seen"])
+    final_step = step + math.ceil((target_tokens - tokens_seen) / step_tokens)
+    if target_tokens <= tokens_seen:
+        raise ValueError("checkpoint already reached the target token budget")
+    config = replace(config, max_steps=final_step, compile_step=False)
+    index, rebuilt = load_or_build_index(args.data_dir, args.index_cache)
+    LOG.info("index=%s rebuilt=%s usable_train_tokens=%s", args.index_cache, rebuilt, index.token_totals("train"))
+    if native:
+        if state["continuation"] != continuation or state["schedule"]["end_step"] != final_step:
+            raise ValueError("resume must retain the checkpoint continuation and schedule")
+        sampling, schedule = state["sampling"], state["schedule"]
+        expected_schedule = make_continuation_schedule(continuation, config,
+            schedule["start_step"], final_step, schedule["start_lr"])
+        saved_schedule = dict(schedule)
+        saved_schedule.setdefault("mode", "cosine_from_imported_lr")
+        if expected_schedule != saved_schedule:
+            raise ValueError("resume changed learning-rate settings; retain the saved schedule")
+        # Reject data changes even if only file size/mtime changed; do not silently
+        # resume RNG against a different document ordering or corpus.
+        if state["index_metadata"] != index.metadata:
+            raise ValueError("data index changed since CUDA checkpoint")
+    else:
+        if continuation["sampling"] == "natural":
+            sampling = natural_sampling(index)
+        elif continuation["sampling"] == "target":
+            sampling = load_sampling_config(args.data_dir)
+        else:
+            raise ValueError("continuation sampling must be natural or target")
+        schedule = make_continuation_schedule(continuation, config, step, final_step,
+                                              state["imported_learning_rate"])
+    sampler = PackedBatchIterator(index, sampling, config.seq_len, config.batch_size,
+                                  config.seed, mode="target", eod_token_id=config.eod_token_id)
+    sampler.load_state_dict(state["sampler"])
+    LOG.info("resumed=%s step=%d tokens=%d final_step=%d target_tokens=%d sampling=%s schedule=%s",
+             checkpoint, step, tokens_seen, final_step, target_tokens, sampling["target_mix"], schedule)
+    resolved = {"model": model_config.to_dict(), "training": config.to_dict(),
+                "continuation": continuation, "sampling": sampling, "schedule": schedule,
+                "origin": state.get("origin"), "index_metadata": index.metadata}
+    (args.run_dir / "resolved_config.json").write_text(json.dumps(resolved, ensure_ascii=False, indent=2))
+    tracker.start(dict(resolved, runtime={"torch": str(torch.__version__),
+        "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(),
+        "parameters": sum(p.numel() for p in model.parameters())}), step, tokens_seen,
+        parent=state.get("tracking"))
+    if args.evaluate_first or args.validate_only or args.expected_val_loss is not None:
+        report = validation_report(model, index, config, device, step)
+        (args.run_dir / "initial_validation.json").write_text(json.dumps(report, indent=2))
+        tracker.validation(report, tokens_seen)
+        if args.expected_val_loss is not None and abs(report["loss"] - args.expected_val_loss) > args.val_tolerance:
+            raise RuntimeError(f"checkpoint validation mismatch: {report['loss']} vs {args.expected_val_loss}")
+    if args.validate_only:
+        return "validated"
+
+    stop = False
+    def request_stop(signum, frame):
+        nonlocal stop
+        stop = True
+        LOG.info("stop requested: finishing current update and saving full checkpoint")
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+    last_saved = step
+    limit = min(final_step, step + args.steps) if args.steps else final_step
+
+    def save():
+        snapshot = dict(resolved, step=step, tokens_seen=tokens_seen, sampler=sampler.state_dict(),
+                        tracking=tracker.identity)
+        saved = save_checkpoint(args.run_dir, snapshot, model, optimizer, scaler, config.max_checkpoints)
+        LOG.info("saved checkpoint %s", saved)
+        tracker.checkpoint(saved, step, tokens_seen)
+
+    # A new run must be independently resumable even before its first periodic
+    # save. This also makes the migrated source an explicit, complete checkpoint.
+    if not (args.run_dir / "checkpoints" / f"step_{step:08d}").exists():
+        save()
+
+    model.train()
+    start_time, start_tokens = time.monotonic(), tokens_seen
+    while step < limit and not stop:
+        before_sampler = copy.deepcopy(sampler.state_dict())
+        update_start = time.monotonic()
+        for attempt in range(8):
+            sampler.load_state_dict(before_sampler)
+            optimizer.zero_grad(set_to_none=True)
+            total_loss = 0.0
+            for _ in range(config.grad_accum_steps):
+                x, y = tensor_batch(next(sampler), device)
+                with torch.autocast("cuda", dtype=torch.float16):
+                    loss = causal_lm_loss(model, x, y)
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(f"non-finite loss before update {step + 1}")
+                total_loss += float(loss.detach())
+                scaler.scale(loss / config.grad_accum_steps).backward()
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            lr = continuation_lr(schedule, step)
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+            if not torch.isfinite(grad_norm):
+                # unscale_ recorded the overflow. Retry identical samples with a
+                # lower loss scale; do not advance optimizer, tokens, or schedule.
+                scaler.update(new_scale=scaler.get_scale() / 2)
+                LOG.warning("nonfinite gradient; retry=%d scale=%g", attempt + 1, scaler.get_scale())
+                tracker.log({"optimizer/overflow_retry": attempt + 1,
+                             "optimizer/loss_scale": scaler.get_scale()}, step, tokens_seen)
+                continue
+            scaler.step(optimizer)
+            scaler.update()
+            break
+        else:
+            raise FloatingPointError("gradient overflow persisted after 8 retries")
+        step += 1
+        tokens_seen += step_tokens
+        if step % config.log_interval == 0:
+            elapsed = time.monotonic() - update_start
+            mean_loss = total_loss / config.grad_accum_steps
+            average_rate = (tokens_seen - start_tokens) / (time.monotonic() - start_time)
+            cycle = sum(step - 1 >= boundary for boundary in schedule.get("cycle_boundaries", [schedule["start_step"]])[1:-1]) + 1
+            tracker.log({"train/loss": mean_loss, "train/perplexity": math.exp(min(mean_loss, 20)),
+                "optimizer/learning_rate": lr, "optimizer/grad_norm": float(grad_norm),
+                "optimizer/loss_scale": scaler.get_scale(), "optimizer/cycle": cycle,
+                "perf/tokens_per_second": step_tokens / elapsed,
+                "perf/average_tokens_per_second": average_rate,
+                "perf/gpu_peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
+                "perf/gpu_reserved_gib": torch.cuda.memory_reserved() / 2**30,
+                "perf/eta_hours": max(0, target_tokens - tokens_seen) / average_rate / 3600,
+                "progress/target_fraction": tokens_seen / target_tokens}, step, tokens_seen)
+            LOG.info("step=%d loss=%.4f ppl=%.2f lr=%.3e grad_norm=%.3f tokens=%d tok/s=%.0f "
+                     "peak_vram_gib=%.2f scale=%g eta_hours=%.1f", step, mean_loss,
+                     math.exp(min(mean_loss, 20)), lr, float(grad_norm), tokens_seen,
+                     step_tokens / elapsed, torch.cuda.max_memory_allocated() / 2**30,
+                     scaler.get_scale(), max(0, target_tokens - tokens_seen) / average_rate / 3600)
+        if config.eval_interval > 0 and step % config.eval_interval == 0:
+            tracker.validation(validation_report(model, index, config, device, step), tokens_seen)
+        if config.save_interval > 0 and step % config.save_interval == 0:
+            save()
+            last_saved = step
+    if step != last_saved:
+        save()
+    LOG.info("%s step=%d tokens=%d", "target reached" if tokens_seen >= target_tokens else "stopped", step, tokens_seen)
+    return "completed" if tokens_seen >= target_tokens else "stopped"
+
+
+def main():
+    args = parse_args()
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    with (args.run_dir / "trainer.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another trainer is already using this run directory") from None
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            handlers=[logging.StreamHandler(), logging.FileHandler(args.run_dir / "trainlog.txt")], force=True)
+        (args.run_dir / "trainer.pid").write_text(str(os.getpid()))
+        tracker = ExperimentTracker(args.run_dir, json.loads(args.config.read_text()).get("tracking"),
+                                    mode=args.wandb_mode)
+        status, exit_code = "failed", 1
+        try:
+            status = run(args, tracker)
+            exit_code = 0
+        except Exception:
+            LOG.exception("training failed; resume from the latest complete checkpoint")
+            raise
+        finally:
+            (args.run_dir / "trainer.pid").unlink(missing_ok=True)
+            try:
+                tracker.finish(status, exit_code)
+            except Exception:
+                LOG.exception("W&B finalization failed; local checkpoints and logs remain available")
+
+
+if __name__ == "__main__":
+    main()

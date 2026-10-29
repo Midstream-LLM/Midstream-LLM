@@ -15,6 +15,8 @@ dist/
 
 # venv
 .venv/
+.venv-cuda/
+.venv-torch/
 venv/
 env/
 
@@ -48,3 +50,10 @@ env/
 
 # Local runtime secrets
 /.webui_secret_key
+
+# Local machine binding for the training watcher (Feishu bot/target ids)
+/configs/train_watch.json
+
+# Local cloud-drive metadata and inference outputs
+/.quarkclouddrive/
+/jishui-inference/

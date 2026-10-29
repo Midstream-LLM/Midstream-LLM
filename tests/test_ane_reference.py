@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ModuleNotFoundError as exc:
+    if exc.name not in {"mlx", "mlx.core"}:
+        raise
+    raise unittest.SkipTest("requires Apple Silicon MLX") from exc
 import numpy as np
 from mlx.utils import tree_flatten
 

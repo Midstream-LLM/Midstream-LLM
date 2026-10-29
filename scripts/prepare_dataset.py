@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Jishui (集水) dataset preparation tooling.
+"""Jishui (击水) dataset preparation tooling.
 
 Subcommands:
   manifest   build dataset/manifests/daizhigev20.jsonl + chinese-classical-corpus.jsonl
