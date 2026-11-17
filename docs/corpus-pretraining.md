@@ -47,6 +47,17 @@ W&B 在线初始化返回 403，在更新前退出；随后使用 `--wandb-mode 
 指标保存在 run 目录的 `wandb/`，标准输出 `train-offline.stdout.log`，
 训练日志为 run 目录的 `trainlog.txt`。在线网络/权限恢复后可再同步离线指标。
 
+独立在线看板已接入 <https://www.fgprc.org.cn/training>，实验 ID 固定为
+`jishui-200m-corpus-pre1945`，开始时间为 `2026-11-18T00:32:41.068+08:00`。
+服务器用户服务 `jishui-corpus-pre1945-dashboard.service` 已启用，每 30 秒读取
+本次 run 日志并推送公开指标；复用训练服务器已有的看板凭据，不与 W&B 互相依赖。
+公开 API 已验证 `live` 状态与步数持续更新。监控服务可用
+`systemctl --user status jishui-corpus-pre1945-dashboard.service` 查看，详细接入说明见
+[在线训练看板](online-dashboard-integration.md)。
+
+代码发布在 GitHub `Midstream-LLM/Midstream-LLM` 的 `codex/corpus-pre1945` 分支，
+基于远端 main 单独整理，未包含本机无关的未提交改动及其他尚未推送的历史提交。
+
 ## 数据口径
 
 - 本轮“1945 年以前”按 **成书年代上界 < 1945** 执行，最晚 1944 年。

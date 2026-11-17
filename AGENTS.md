@@ -93,3 +93,4 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 - 2026-11-18 已部署 corpus：发布任务 #25 → release #2，导出任务 #26 → export #1。954,533 篇 / 436,023,259 tokens；训练集 427,815,186 tokens，26 类含未分类。完整导出压缩包已通过 Chrome 上传北京 `fgprc/dataset/`，用户要求继承公共读。
 - 服务器根目录 `/media/sidi762/b41354bc-9442-475d-9c51-ad8d110f2139/Jishui`；本轮代码快照 `deployments/corpus-pre1945-20261118`，数据 `dataset/corpus-pre1945-v2`，run `runs/jishui-200m-corpus-pre1945`。28 项测试和 20 步 CUDA 短测通过，完整保存 step 20 后启动正式恢复训练；从零初始化，目标 4B tokens，fp16 AMP，峰值显存 6.31 GiB。
 - 用户已授权暂停 Qwen llama-server 以释放 3060；重启参数保存在部署目录 `qwen-paused.json`。本轮操作记录与复现见 `docs/corpus-pretraining.md`。4B 旧实验保持结束状态。
+- W&B 在线返回 403，本轮使用 offline 模式保留指标；独立在线训练看板 `https://www.fgprc.org.cn/training` 已通过用户服务 `jishui-corpus-pre1945-dashboard.service` 每 30 秒持续推送，runId 为 `jishui-200m-corpus-pre1945`。
