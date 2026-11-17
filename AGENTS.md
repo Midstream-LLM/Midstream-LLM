@@ -84,3 +84,12 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 - 参数主副本/Adam 为 fp32，计算用 fp16 AMP + GradScaler。配置见 `configs/jishui-200m-cuda-4b.json`。
 - CUDA 模型及完整状态迁移已验证；多卡正式 trainer 尚未接入，`train_torch.py` 仍是 runtime 探测入口。
 - 操作说明见 `docs/cuda-continuation.md`，正式产物在 `runs/jishui-200m-cuda-4b/`，保留原 MLX checkpoints。
+
+## 新语料重新预训练（2026-11-17）
+- 训练服务器就是 corpus 服务器。用户要求沿用 200M 架构，只用 1945 年以前的数据。
+- 截止条件为结构化成书年代上界 < 1945（含 1944、不含 1945）；未知/无上界和跨界记录排除，保留清单。
+- `jishui.prepare_corpus` 消费语料管理工具带模板的完整文档 JSONL/Parquet 导出，转简后编码 NPY；不使用管理工具仍按原正文编码的 `tokenize` 路径。独立输出目录，不修改总库。
+- 新配置 `configs/jishui-200m-corpus-pre1945.json` 支持字符串分类（含未分类），按 epoch 打乱文档并完整消费正文；新 run 可从零或 `--init-from` 旧 CUDA 权重初始化，`--resume` 严格恢复同一任务。
+- 2026-11-18 已部署 corpus：发布任务 #25 → release #2，导出任务 #26 → export #1。954,533 篇 / 436,023,259 tokens；训练集 427,815,186 tokens，26 类含未分类。完整导出压缩包已通过 Chrome 上传北京 `fgprc/dataset/`，用户要求继承公共读。
+- 服务器根目录 `/media/sidi762/b41354bc-9442-475d-9c51-ad8d110f2139/Jishui`；本轮代码快照 `deployments/corpus-pre1945-20261118`，数据 `dataset/corpus-pre1945-v2`，run `runs/jishui-200m-corpus-pre1945`。28 项测试和 20 步 CUDA 短测通过，完整保存 step 20 后启动正式恢复训练；从零初始化，目标 4B tokens，fp16 AMP，峰值显存 6.31 GiB。
+- 用户已授权暂停 Qwen llama-server 以释放 3060；重启参数保存在部署目录 `qwen-paused.json`。本轮操作记录与复现见 `docs/corpus-pretraining.md`。4B 旧实验保持结束状态。

@@ -44,7 +44,7 @@ class ExperimentTracker:
         self.run = wandb.init(
             entity=entity, project=project, id=run_id,
             name=self.settings.get("name", self.run_dir.name), group=saved["group"],
-            job_type="pretraining", tags=["200m", "cuda", "4b", "cosine-restarts"],
+            job_type="pretraining", tags=self.settings.get("tags", ["200m", "cuda", "4b", "cosine-restarts"]),
             dir=str(self.run_dir.resolve()), mode=self.mode,
             resume="allow" if self.mode == "online" else None,
             config=config, force=self.mode == "online", save_code=False,

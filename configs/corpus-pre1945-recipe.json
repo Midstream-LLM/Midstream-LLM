@@ -1,0 +1,16 @@
+{
+  "name": "jishui-pre1945-v2",
+  "seed": "jishui-pre1945-v2",
+  "filters": {
+    "quality": ["ok"],
+    "year_to": 1944,
+    "include_unknown_years": false
+  },
+  "exclude": [
+    {"year_from": 1945}
+  ],
+  "selection": {"dedup": "span", "min_cut_chars": 64},
+  "split_by": "chars",
+  "stratify": ["source"],
+  "splits": {"train": 0.98, "val": 0.01, "test": 0.01}
+}

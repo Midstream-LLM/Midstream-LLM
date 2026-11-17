@@ -1,6 +1,8 @@
 # Corpus — large, read-only, not version-controlled (see AGENTS.md)
 /dataset/normalized/
 /dataset/processed/
+/dataset/corpus-pre1945-v2/
+/dataset/deliveries/
 /dataset/raw/
 /dataset/manifests/
 

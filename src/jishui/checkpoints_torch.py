@@ -110,3 +110,14 @@ def load_checkpoint(path: Path, model, optimizer, scaler) -> dict:
     if bundle["cuda_rng"]:
         torch.cuda.set_rng_state_all(bundle["cuda_rng"])
     return state
+
+
+def load_model_weights(path: Path, model) -> dict:
+    """Start a new run from weights without inheriting its data, Adam or counters."""
+    bundle = torch.load(path / "training.pt", map_location="cpu", weights_only=True, mmap=True)
+    if bundle["format_version"] != 1:
+        raise ValueError("unsupported CUDA checkpoint format")
+    state = bundle["state"]
+    check_model_config(state["model"], model.config.to_dict())
+    model.load_state_dict(bundle["model"], strict=True)
+    return state

@@ -12,7 +12,8 @@
 |---|---|
 | `src/jishui/config.py` / `data.py` | 模型与训练配置、mmap 数据索引、可恢复采样器 |
 | `src/jishui/model_torch.py` | PyTorch 模型、RoPE、因果注意力、梯度重算 |
-| `src/jishui/pretrain_torch.py` | 单卡 CUDA 续训、验证、梯度累积、溢出重试与温和停止 |
+| `src/jishui/pretrain_torch.py` | 单卡从零训练、权重初始化、完整续训、验证与温和停止 |
+| `src/jishui/prepare_corpus.py` | 带模板文本导出→年代过滤→转简→NPY 训练分片 |
 | `src/jishui/checkpoints_torch.py` | MLX 权重及 Adam 状态导入、完整 CUDA checkpoint 保存与恢复 |
 | `src/jishui/schedules_torch.py` | 按绝对更新步数计算余弦重启学习率 |
 | `src/jishui/tracking.py` | 可选 W&B 指标追踪和恢复关联 |
@@ -35,9 +36,12 @@ python3 -m venv .venv-torch
 ```
 
 准备本地冻结数据、tokenizer 和完整恢复点后，按 [CUDA 续训说明](docs/cuda-continuation.md)
-启动。该 trainer 要求已有完整 MLX / CUDA checkpoint；4B 配置是已完成实验的记录，
+启动。旧 continuation 配置要求已有完整 MLX / CUDA checkpoint；4B 配置是已完成实验的记录，
 不能直接从最终 checkpoint 再次续训同一目标。`scripts/start_cuda_4b.sh` 使用 Linux systemd
-用户服务托管训练；本次代码整理不启动训练。
+用户服务托管训练。
+
+新语料使用 [1945 年以前语料的重新预训练流程](docs/corpus-pretraining.md)：
+带模板正文导出、严格年代门槛、动态分类、独立 run；支持从零训练或只加载旧权重。
 
 ```bash
 # 查看现有训练状态，不发送通知
@@ -53,6 +57,7 @@ PYTHONPATH=src .venv-torch/bin/python -m unittest discover -s tests -v
 ## 数据与复现
 
 - [数据生产运行说明](docs/data-production-run.md)：清洗、去重、划分、tokenize 与采样权重。
+- [语料库预训练衔接](docs/corpus-pretraining.md)：新导出、模板、1945 年截止条件和独立训练。
 - [模型配置](docs/model-config.md)：模型结构及规模。
 - [CUDA 续训说明](docs/cuda-continuation.md)：迁移、日程、恢复、推理和 W&B。
 - [分布式 runtime](docs/torch-distributed.md)：设备探测与 collective smoke。

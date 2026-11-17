@@ -40,6 +40,7 @@ class LogFeed:
         self.identity = None
         self.latest = None
         self.validation = None
+        self.started_at = None
         self.history = {key: {} for key in ('trainLoss','valLoss','learningRate','throughput')}
         self.state = 'live'
 
@@ -64,6 +65,12 @@ class LogFeed:
 
     def parse(self, line):
         fields = dict(FIELDS.findall(line))
+        try:
+            stamp = dt.datetime.strptime(line[:23], '%Y-%m-%d %H:%M:%S,%f').replace(tzinfo=TZ)
+        except ValueError:
+            stamp = None
+        if stamp is not None and getattr(self, 'started_at', None) is None:
+            self.started_at = stamp
         if 'target reached' in line:
             self.state = 'finished'
         elif 'training failed' in line or 'Traceback (most recent call last)' in line:
@@ -72,7 +79,8 @@ class LogFeed:
             self.state = 'paused'
         try:
             step = int(fields['step'])
-            stamp = dt.datetime.strptime(line[:23], '%Y-%m-%d %H:%M:%S,%f').replace(tzinfo=TZ)
+            if stamp is None:
+                return
             if 'validation step=' in line:
                 value = float(fields['loss'])
                 if math.isfinite(value):
@@ -100,7 +108,11 @@ class LogFeed:
         if not self.latest:
             return None
         row = self.latest
-        target = self.config['continuation']['target_tokens']
+        pretraining = self.config.get('pretraining')
+        recipe = pretraining or self.config.get('continuation')
+        if not recipe:
+            raise ValueError('Run has no pretraining or continuation token budget')
+        target = recipe['target_tokens']
         train = self.config['training']
         wandb_file = self.run/'wandb_run.json'
         wandb = json.loads(wandb_file.read_text()) if wandb_file.exists() else {}
@@ -109,9 +121,10 @@ class LogFeed:
             state = 'paused'
         return dict(
             title='击水 · 200M', subtitle='古汉语原生语言模型 · 从零预训练',
-            runId=self.run.name, runName='200M → 4B tokens', runUrl=wandb.get('url',''),
+            runId=self.run.name, runName=('200M · 1945年前语料' if pretraining else '200M → 4B tokens'), runUrl=wandb.get('url') or '',
+            startedAt=self.started_at.isoformat() if self.started_at else row['stamp'].isoformat(),
             status=state, timestamp=row['stamp'].isoformat(),
-            config=dict(model='击水 200M', dataset='古汉语混合语料', batchSize=train['batch_size']*train['grad_accum_steps'],sequenceLength=train['seq_len']),
+            config=dict(model='击水 200M', dataset=('中流语料库 · 成书年代上界 < 1945' if pretraining else '古汉语混合语料'), batchSize=train['batch_size']*train['grad_accum_steps'],sequenceLength=train['seq_len']),
             progress=dict(step=row['step'],tokens=row['tokens'],targetTokens=target),
             metrics={**{key:row[key] for key in KEYS.values()},'valLoss':self.validation},
             charts={key:sample([dict(step=step,value=value) for step,value in sorted(history.items())]) for key,history in self.history.items()},
@@ -122,14 +135,14 @@ class LogFeed:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-dir', type=Path, default=Path('runs/jishui-200m-cuda-4b'))
-    parser.add_argument('--endpoint', default=os.environ.get('TRAINING_PUSH_URL'))
+    parser.add_argument('--endpoint', default=os.environ.get('TRAINING_DASHBOARD_INGEST_URL') or os.environ.get('TRAINING_PUSH_URL'))
     parser.add_argument('--interval', type=int, default=30)
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
     token = os.environ.get('TRAINING_INGEST_TOKEN','')
     if not args.dry_run and (not args.endpoint or not token):
-        parser.error('Set TRAINING_PUSH_URL and TRAINING_INGEST_TOKEN')
+        parser.error('Set TRAINING_DASHBOARD_INGEST_URL (or TRAINING_PUSH_URL) and TRAINING_INGEST_TOKEN')
     if not args.dry_run and not args.endpoint.startswith('https://') and not args.endpoint.startswith('http://127.0.0.1:'):
         parser.error('Use HTTPS for remote pushes')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')

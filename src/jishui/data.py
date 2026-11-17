@@ -91,10 +91,17 @@ class PretrainIndex:
 
     def token_totals(self, split: str) -> dict[int, int]:
         ids = self.indices_for(split)
-        return {
-            category: int(self.lengths[ids[self.categories[ids] == category]].sum())
-            for category in range(1, 7)
-        }
+        categories = self.category_ids
+        totals = np.zeros(max(categories, default=0) + 1, dtype=np.uint64)
+        selected = ids[self.categories[ids] < len(totals)]
+        np.add.at(totals, self.categories[selected], self.lengths[selected].astype(np.uint64))
+        return {category: int(totals[category]) for category in categories}
+
+    @property
+    def category_ids(self):
+        if self.metadata.get("category_mode") == "labels":
+            return sorted(int(k) for k in self.metadata["category_labels"])
+        return range(1, 7)
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
@@ -132,7 +139,10 @@ class PretrainIndex:
 def build_pretrain_index(
     data_dir: str | Path,
     metadata_manifest: str | Path | None = None,
+    *, category_mode: str = "legacy",
 ) -> PretrainIndex:
+    if category_mode not in {"legacy", "labels"}:
+        raise ValueError("category_mode must be legacy or labels")
     data_dir = Path(data_dir)
     token_manifest = data_dir / "manifest" / "docs_tokens.jsonl"
     if metadata_manifest is None:
@@ -140,16 +150,17 @@ def build_pretrain_index(
     metadata_manifest = Path(metadata_manifest)
     recovered_wikisource = (
         _load_wikisource_categories(metadata_manifest)
-        if metadata_manifest.exists()
+        if category_mode == "legacy" and metadata_manifest.exists()
         else {}
     )
-    shards = array("B")
+    shards = array("I")
     offsets = array("Q")
     lengths = array("I")
-    categories = array("B")
+    categories = array("I")
     splits = array("B")
-    sources = array("B")
+    sources = array("I")
     source_to_id: dict[str, int] = {}
+    label_to_id = {}
     recovered_count = 0
     unresolved_count = 0
     unresolved_tokens = 0
@@ -161,8 +172,15 @@ def build_pretrain_index(
             if source not in source_to_id:
                 source_to_id[source] = len(source_to_id)
             category_text = record.get("category", "")
-            category = int(category_text) if category_text else 0
-            if category == 0 and source == "wikisource":
+            if category_mode == "labels":
+                label = str(category_text).strip() if category_text is not None else None
+                label = label or None
+                if label not in label_to_id:
+                    label_to_id[label] = len(label_to_id) + 1
+                category = label_to_id[label]
+            else:
+                category = int(category_text) if category_text else 0
+            if category_mode == "legacy" and category == 0 and source == "wikisource":
                 category = recovered_wikisource.get(record["doc_id"], 0)
                 recovered_count += category > 0
             if category == 0:
@@ -187,14 +205,18 @@ def build_pretrain_index(
         "unresolved_documents_excluded": unresolved_count,
         "unresolved_tokens_excluded": unresolved_tokens,
     }
+    if category_mode == "labels":
+        metadata.update(category_mode="labels", category_labels={str(v): k for k, v in label_to_id.items()})
+        metadata["category_recovery"] = "not-needed"
+        metadata["dataset_manifest"] = _file_identity(data_dir / "manifest.json")
     return PretrainIndex(
         data_dir=data_dir,
-        shards=np.asarray(shards, dtype=np.uint8),
+        shards=np.asarray(shards, dtype=np.uint32),
         offsets=np.asarray(offsets, dtype=np.uint64),
         lengths=np.asarray(lengths, dtype=np.uint32),
-        categories=np.asarray(categories, dtype=np.uint8),
+        categories=np.asarray(categories, dtype=np.uint32),
         splits=np.asarray(splits, dtype=np.uint8),
-        sources=np.asarray(sources, dtype=np.uint8),
+        sources=np.asarray(sources, dtype=np.uint32),
         source_names=source_names,
         metadata=metadata,
     )
@@ -204,6 +226,7 @@ def load_or_build_index(
     data_dir: str | Path,
     cache_path: str | Path,
     metadata_manifest: str | Path | None = None,
+    *, category_mode: str = "legacy",
 ) -> tuple[PretrainIndex, bool]:
     data_dir = Path(data_dir)
     cache_path = Path(cache_path)
@@ -216,11 +239,14 @@ def load_or_build_index(
         "token_manifest": _file_identity(token_manifest),
         "metadata_manifest": _file_identity(metadata_manifest),
     }
+    if category_mode == "labels":
+        expected.update(category_mode="labels", dataset_manifest=_file_identity(data_dir / "manifest.json"))
     if cache_path.exists():
         index = PretrainIndex.load(cache_path, data_dir)
-        if all(index.metadata.get(key) == value for key, value in expected.items()):
+        if (index.metadata.get("category_mode", "legacy") == category_mode
+                and all(index.metadata.get(key) == value for key, value in expected.items())):
             return index, False
-    index = build_pretrain_index(data_dir, metadata_manifest)
+    index = build_pretrain_index(data_dir, metadata_manifest, category_mode=category_mode)
     index.save(cache_path)
     return index, True
 
@@ -228,6 +254,71 @@ def load_or_build_index(
 def load_sampling_config(data_dir: str | Path) -> dict:
     with (Path(data_dir) / "sampling_weights.json").open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+class ShuffledDocumentIterator(Iterator[np.ndarray]):
+    """Shuffle documents each epoch and consume every token, including prefixes.
+
+    Packing crosses document boundaries with EOD; it never randomly discards a
+    document's beginning. State is small and reconstructs the epoch permutation.
+    """
+
+    def __init__(self, index, seq_len, batch_size, seed, eod_token_id=2):
+        self.index, self.seq_len, self.batch_size = index, seq_len, batch_size
+        self.seed, self.eod_token_id = seed, eod_token_id
+        self.ids = index.indices_for("train")
+        if not len(self.ids) or np.any(index.lengths[self.ids] <= 0):
+            raise ValueError("document stream requires nonempty, positive-length training documents")
+        self.epoch = self.doc_position = self.token_position = self.batches_emitted = 0
+        self.need_eod, self.carry = False, None
+        self._shuffle()
+
+    def _shuffle(self):
+        self.order = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch])).permutation(self.ids)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        result = np.empty((self.batch_size, self.seq_len + 1), dtype=np.int32)
+        for row in result:
+            pos = 0
+            if self.carry is not None:
+                row[0], pos = self.carry, 1
+            while pos < len(row):
+                if self.need_eod:
+                    row[pos] = self.eod_token_id
+                    pos += 1
+                    self.need_eod = False
+                    self.doc_position += 1
+                    self.token_position = 0
+                    if self.doc_position == len(self.order):
+                        self.doc_position = 0
+                        self.epoch += 1
+                        self._shuffle()
+                    continue
+                doc = int(self.order[self.doc_position])
+                size = min(int(self.index.lengths[doc]) - self.token_position, len(row) - pos)
+                offset = int(self.index.offsets[doc]) + self.token_position
+                row[pos:pos + size] = self.index.token_shards[int(self.index.shards[doc])][offset:offset + size]
+                pos += size
+                self.token_position += size
+                self.need_eod = self.token_position == int(self.index.lengths[doc])
+            self.carry = int(row[-1])
+        self.batches_emitted += 1
+        return result
+
+    def state_dict(self):
+        return {"kind": "document_stream", "seed": self.seed, "epoch": self.epoch,
+                "doc_position": self.doc_position, "token_position": self.token_position,
+                "need_eod": self.need_eod, "carry": self.carry, "batches_emitted": self.batches_emitted}
+
+    def load_state_dict(self, state):
+        if state.get("kind") != "document_stream" or state["seed"] != self.seed:
+            raise ValueError("document stream configuration changed")
+        for key in ("epoch", "doc_position", "token_position", "need_eod", "carry", "batches_emitted"):
+            setattr(self, key, state[key])
+        self._shuffle()
 
 
 class PackedBatchIterator(Iterator[np.ndarray]):
@@ -254,7 +345,7 @@ class PackedBatchIterator(Iterator[np.ndarray]):
         self._groups: dict[int, np.ndarray] = {}
         self._cumulative: dict[int, np.ndarray] = {}
         totals: dict[int, int] = {}
-        for category in range(1, 7):
+        for category in index.category_ids:
             ids = train_ids[index.categories[train_ids] == category]
             if len(ids) == 0:
                 continue
@@ -263,7 +354,7 @@ class PackedBatchIterator(Iterator[np.ndarray]):
             self._cumulative[category] = cumulative
             totals[category] = int(cumulative[-1])
 
-        self.category_ids = np.asarray(sorted(self._groups), dtype=np.uint8)
+        self.category_ids = np.asarray(sorted(self._groups), dtype=np.uint32)
         if mode == "target":
             raw = np.asarray(
                 [float(sampling["target_mix"][str(cat)]) for cat in self.category_ids],
@@ -280,6 +371,8 @@ class PackedBatchIterator(Iterator[np.ndarray]):
             )
         else:
             raise ValueError(f"unknown sampling mode: {mode}")
+        if not len(raw) or not np.isfinite(raw).all() or np.any(raw < 0) or raw.sum() <= 0:
+            raise ValueError("training sampling probabilities must be finite, nonnegative and nonempty")
         self.category_probabilities = raw / raw.sum()
 
     def __iter__(self) -> "PackedBatchIterator":

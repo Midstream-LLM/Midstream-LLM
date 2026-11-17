@@ -4,6 +4,15 @@ from __future__ import annotations
 import math
 
 
+def make_pretraining_schedule(config, end_step):
+    if (config.warmup_steps < 0 or config.warmup_steps >= end_step - 1
+            or not 0 < config.min_learning_rate <= config.learning_rate):
+        raise ValueError("pretraining needs positive learning rates and at least two decay updates")
+    return {"mode": "cosine", "start_step": 0, "end_step": end_step,
+            "warmup_steps": config.warmup_steps, "peak_lr": config.learning_rate,
+            "end_lr": config.min_learning_rate}
+
+
 def make_continuation_schedule(continuation, config, start_step, end_step, imported_lr):
     mode = continuation["schedule"]
     common = {"mode": mode, "start_step": start_step, "end_step": end_step,
@@ -38,6 +47,13 @@ def continuation_lr(schedule: dict, completed_step: int) -> float:
     Only the first cycle has a linear transition from the imported LR. Later
     cycles reset LR to the peak, retaining all model and optimizer state.
     """
+    if schedule.get("mode") == "cosine":
+        warmup = schedule["warmup_steps"]
+        if completed_step < warmup:
+            return schedule["peak_lr"] * (completed_step + 1) / warmup
+        progress = min(1.0, max(0.0, (completed_step - warmup) /
+                               (schedule["end_step"] - warmup - 1)))
+        return schedule["end_lr"] + 0.5 * (schedule["peak_lr"] - schedule["end_lr"]) * (1 + math.cos(math.pi * progress))
     if schedule.get("mode", "cosine_from_imported_lr") == "cosine_from_imported_lr":
         progress = min(1.0, max(0.0, (completed_step - schedule["start_step"]) /
                                max(1, schedule["end_step"] - schedule["start_step"])))

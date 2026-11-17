@@ -1,4 +1,4 @@
-"""Single-CUDA pretraining with full-state MLX import and bounded continuation."""
+"""Single-GPU pretraining, new-corpus initialization and exact continuation."""
 from __future__ import annotations
 
 import argparse
@@ -11,17 +11,18 @@ import os
 import signal
 import time
 from dataclasses import replace
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from .checkpoints import latest_checkpoint
-from .checkpoints_torch import import_mlx, load_checkpoint, save_checkpoint
+from .checkpoints_torch import import_mlx, load_checkpoint, load_model_weights, save_checkpoint
 from .config import load_run_config
-from .data import PackedBatchIterator, SequentialBatchIterator, load_or_build_index, load_sampling_config
+from .data import PackedBatchIterator, SequentialBatchIterator, ShuffledDocumentIterator, load_or_build_index, load_sampling_config
 from .model_torch import JishuiForCausalLM, causal_lm_loss
-from .schedules_torch import continuation_lr, make_continuation_schedule
+from .schedules_torch import continuation_lr, make_continuation_schedule, make_pretraining_schedule
 from .tracking import ExperimentTracker
 
 LOG = logging.getLogger("jishui.pretrain_torch")
@@ -40,6 +41,10 @@ def tensor_batch(batch, device):
     return tokens[:, :-1], tokens[:, 1:]
 
 
+def autocast(device):
+    return torch.autocast("cuda", dtype=torch.float16) if device.type == "cuda" else nullcontext()
+
+
 @torch.no_grad()
 def evaluate(model, index, config, device, category=None) -> float:
     model.eval()
@@ -48,7 +53,7 @@ def evaluate(model, index, config, device, category=None) -> float:
     losses = []
     for _ in range(config.eval_batches):
         x, y = tensor_batch(next(iterator), device)
-        with torch.autocast("cuda", dtype=torch.float16):
+        with autocast(device):
             loss = causal_lm_loss(model, x, y)
         losses.append(float(loss))
     model.train()
@@ -58,10 +63,14 @@ def evaluate(model, index, config, device, category=None) -> float:
     return result
 
 
-def validation_report(model, index, config, device, step):
+def validation_report(model, index, config, device, step, max_categories=None):
     overall = evaluate(model, index, config, device)
     categories = {}
-    for category in range(1, 7):
+    category_ids = index.category_ids
+    if max_categories is not None:
+        totals = index.token_totals("val")
+        category_ids = sorted(totals, key=lambda key: (-totals[key], key))[:max_categories]
+    for category in category_ids:
         if np.any((index.splits == 1) & (index.categories == category)):
             categories[category] = evaluate(model, index, config, device, category)
     LOG.info("validation step=%d loss=%.4f ppl=%.2f per_category=%s", step, overall,
@@ -74,8 +83,11 @@ def parse_args():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--data-dir", type=Path, default=Path("dataset/processed"))
-    parser.add_argument("--index-cache", type=Path, default=Path("runs/cache/pretrain_index_cuda.npz"))
-    parser.add_argument("--resume", required=True, help="MLX/CUDA checkpoint directory or latest")
+    parser.add_argument("--index-cache", type=Path, help="default: a cache inside the run directory")
+    start = parser.add_mutually_exclusive_group()
+    start.add_argument("--resume", help="exact MLX/CUDA checkpoint recovery, or latest")
+    start.add_argument("--init-from", type=Path, help="initialize a NEW pretraining run from CUDA weights only")
+    parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="CPU float32 is for small validation runs")
     parser.add_argument("--steps", type=int, help="stop and save after this many updates (smoke test)")
     parser.add_argument("--evaluate-first", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
@@ -89,49 +101,103 @@ def parse_args():
 def run(args, tracker):
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("this continuation trainer supports one CUDA GPU; do not launch with torchrun")
-    if not torch.cuda.is_available():
+    device = torch.device("cuda:0" if getattr(args, "device", "cuda") == "cuda" else "cpu")
+    if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; run in the host GPU environment")
     if args.steps is not None and args.steps <= 0:
         raise ValueError("--steps must be positive")
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
     torch.set_num_threads(4)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     raw = json.loads(args.config.read_text())
     model_config, config = load_run_config(args.config)
-    if config.dtype != "float16":
-        raise ValueError("CUDA continuation currently requires float16 AMP")
+    if config.dtype != ("float16" if device.type == "cuda" else "float32"):
+        raise ValueError("use float16 AMP on CUDA or float32 for CPU validation")
     if config.seq_len > model_config.max_position_embeddings or config.eval_batches < 1:
         raise ValueError("invalid sequence length or evaluation batches")
-    continuation = raw["continuation"]
-    if continuation.get("schedule") not in {"cosine_from_imported_lr", "cosine_warm_restarts"}:
+    pretraining = raw.get("pretraining")
+    new_corpus = pretraining is not None
+    continuation = raw.get("continuation")
+    if new_corpus and continuation is not None:
+        raise ValueError("choose pretraining or continuation, not both")
+    if new_corpus:
+        if pretraining.get("schedule") != "cosine" or pretraining.get("sampling") not in {"natural", "target", "document_stream"}:
+            raise ValueError("unsupported pretraining schedule or sampling")
+        if type(pretraining.get("eval_categories", 12)) is not int or pretraining.get("eval_categories", 12) < 0:
+            raise ValueError("eval_categories must be a nonnegative integer")
+    elif not args.resume or continuation is None:
+        raise ValueError("legacy continuation requires --resume; use a pretraining config for a new run")
+    elif continuation.get("schedule") not in {"cosine_from_imported_lr", "cosine_warm_restarts"}:
         raise ValueError("unsupported continuation schedule")
-    target_tokens = int(continuation["target_tokens"])
+    if getattr(args, "init_from", None) and not new_corpus:
+        raise ValueError("--init-from requires a pretraining configuration")
+    target_tokens = int((pretraining if new_corpus else continuation)["target_tokens"])
+    if target_tokens <= 0:
+        raise ValueError("target_tokens must be positive")
     step_tokens = config.seq_len * config.batch_size * config.grad_accum_steps
-    checkpoint = latest_checkpoint(args.run_dir) if args.resume == "latest" else Path(args.resume)
-    source_meta = json.loads((checkpoint / "train_state.json").read_text())
-    for name in ("seq_len", "batch_size", "grad_accum_steps", "eod_token_id", "beta1", "beta2", "adam_eps", "weight_decay", "grad_clip"):
-        if source_meta["training"][name] != getattr(config, name):
-            raise ValueError(f"continuation changed {name}; explicit migration is required")
+    checkpoint = (latest_checkpoint(args.run_dir) if args.resume == "latest" else Path(args.resume)) if args.resume else None
+    if checkpoint is None and ((args.run_dir / "checkpoints").exists() or (args.run_dir / "resolved_config.json").exists()):
+        raise ValueError("run directory already contains a run; use --resume latest or a new directory")
+    source_meta = json.loads((checkpoint / "train_state.json").read_text()) if checkpoint else None
+    if source_meta:
+        for name in ("seq_len", "batch_size", "grad_accum_steps", "eod_token_id", "beta1", "beta2", "adam_eps", "weight_decay", "grad_clip"):
+            if source_meta["training"][name] != getattr(config, name):
+                raise ValueError(f"continuation changed {name}; explicit migration is required")
+    data_policy = raw.get("data", {})
+    if new_corpus:
+        from .prepare_corpus import validate_training_data
+        if data_policy.get("category_mode") != "labels" or type(data_policy.get("before_year")) is not int:
+            raise ValueError("new corpus requires category_mode=labels and an explicit before_year")
+        validate_training_data(args.data_dir, before_year=data_policy["before_year"],
+                               vocab_size=model_config.vocab_size,
+                               tokenizer_sha256=data_policy.get("tokenizer_sha256"))
     torch.manual_seed(config.seed)
     model = JishuiForCausalLM(model_config).to(device)
+    if checkpoint is None:
+        model.initialize_pretraining()
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
-        betas=(config.beta1, config.beta2), eps=config.adam_eps, weight_decay=config.weight_decay, fused=True)
-    scaler = torch.amp.GradScaler("cuda", init_scale=config.loss_scale)
-    LOG.info("device=%s torch=%s parameters=%d", torch.cuda.get_device_name(), torch.__version__,
+        betas=(config.beta1, config.beta2), eps=config.adam_eps, weight_decay=config.weight_decay, fused=device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", init_scale=config.loss_scale, enabled=device.type == "cuda")
+    gpu_name = torch.cuda.get_device_name() if device.type == "cuda" else "cpu"
+    LOG.info("device=%s torch=%s parameters=%d", gpu_name, torch.__version__,
              sum(p.numel() for p in model.parameters()))
-    native = (checkpoint / "training.pt").exists()
-    state = (load_checkpoint(checkpoint, model, optimizer, scaler) if native
-             else import_mlx(checkpoint, model, optimizer))
+    native = checkpoint is not None and (checkpoint / "training.pt").exists()
+    if new_corpus and checkpoint and not native:
+        raise ValueError("new-corpus resume requires its own PyTorch checkpoint")
+    if checkpoint:
+        state = (load_checkpoint(checkpoint, model, optimizer, scaler) if native
+                 else import_mlx(checkpoint, model, optimizer))
+    else:
+        state = {"step": 0, "tokens_seen": 0, "origin": {"format": "random", "seed": config.seed}}
+        if getattr(args, "init_from", None):
+            parent = load_model_weights(args.init_from, model)
+            state["origin"] = {"format": "weights_only", "checkpoint": str(args.init_from.resolve()),
+                               "parent_step": parent["step"], "parent_tokens": parent["tokens_seen"]}
+            state["tracking"] = parent.get("tracking")
     step, tokens_seen = int(state["step"]), int(state["tokens_seen"])
     final_step = step + math.ceil((target_tokens - tokens_seen) / step_tokens)
     if target_tokens <= tokens_seen:
         raise ValueError("checkpoint already reached the target token budget")
     config = replace(config, max_steps=final_step, compile_step=False)
-    index, rebuilt = load_or_build_index(args.data_dir, args.index_cache)
+    index, rebuilt = load_or_build_index(args.data_dir, args.index_cache or args.run_dir / "pretrain_index.npz",
+                                        category_mode=data_policy.get("category_mode", "legacy"))
     LOG.info("index=%s rebuilt=%s usable_train_tokens=%s", args.index_cache, rebuilt, index.token_totals("train"))
-    if native:
+    if new_corpus:
+        schedule = make_pretraining_schedule(config, final_step)
+        if pretraining["sampling"] == "document_stream":
+            sampling = {"mode": "document_stream"}
+        else:
+            sampling = natural_sampling(index) if pretraining["sampling"] == "natural" else load_sampling_config(args.data_dir)
+        if native:
+            for key, expected in (("pretraining", pretraining), ("schedule", schedule), ("sampling", sampling),
+                                  ("data_policy", data_policy), ("index_metadata", index.metadata)):
+                if state.get(key) != expected:
+                    raise ValueError(f"resume changed {key}; use --init-from for a new training run")
+            if source_meta["training"]["seed"] != config.seed or source_meta["training"]["dtype"] != config.dtype:
+                raise ValueError("resume changed seed or dtype")
+    elif native:
         if state["continuation"] != continuation or state["schedule"]["end_step"] != final_step:
             raise ValueError("resume must retain the checkpoint continuation and schedule")
         sampling, schedule = state["sampling"], state["schedule"]
@@ -154,21 +220,28 @@ def run(args, tracker):
             raise ValueError("continuation sampling must be natural or target")
         schedule = make_continuation_schedule(continuation, config, step, final_step,
                                               state["imported_learning_rate"])
-    sampler = PackedBatchIterator(index, sampling, config.seq_len, config.batch_size,
-                                  config.seed, mode="target", eod_token_id=config.eod_token_id)
-    sampler.load_state_dict(state["sampler"])
+    if sampling.get("mode") == "document_stream":
+        sampler = ShuffledDocumentIterator(index, config.seq_len, config.batch_size, config.seed, config.eod_token_id)
+    else:
+        sampler = PackedBatchIterator(index, sampling, config.seq_len, config.batch_size,
+                                      config.seed, mode="target", eod_token_id=config.eod_token_id)
+    if checkpoint:
+        sampler.load_state_dict(state["sampler"])
     LOG.info("resumed=%s step=%d tokens=%d final_step=%d target_tokens=%d sampling=%s schedule=%s",
-             checkpoint, step, tokens_seen, final_step, target_tokens, sampling["target_mix"], schedule)
+             checkpoint, step, tokens_seen, final_step, target_tokens, sampling.get("target_mix", sampling), schedule)
     resolved = {"model": model_config.to_dict(), "training": config.to_dict(),
                 "continuation": continuation, "sampling": sampling, "schedule": schedule,
                 "origin": state.get("origin"), "index_metadata": index.metadata}
+    if new_corpus:
+        resolved.update(pretraining=pretraining, data_policy=data_policy)
     (args.run_dir / "resolved_config.json").write_text(json.dumps(resolved, ensure_ascii=False, indent=2))
     tracker.start(dict(resolved, runtime={"torch": str(torch.__version__),
-        "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(),
+        "cuda": torch.version.cuda, "gpu": gpu_name,
         "parameters": sum(p.numel() for p in model.parameters())}), step, tokens_seen,
         parent=state.get("tracking"))
     if args.evaluate_first or args.validate_only or args.expected_val_loss is not None:
-        report = validation_report(model, index, config, device, step)
+        report = validation_report(model, index, config, device, step,
+                                   max_categories=pretraining.get("eval_categories", 12) if new_corpus else None)
         (args.run_dir / "initial_validation.json").write_text(json.dumps(report, indent=2))
         tracker.validation(report, tokens_seen)
         if args.expected_val_loss is not None and abs(report["loss"] - args.expected_val_loss) > args.val_tolerance:
@@ -209,7 +282,7 @@ def run(args, tracker):
             total_loss = 0.0
             for _ in range(config.grad_accum_steps):
                 x, y = tensor_batch(next(sampler), device)
-                with torch.autocast("cuda", dtype=torch.float16):
+                with autocast(device):
                     loss = causal_lm_loss(model, x, y)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"non-finite loss before update {step + 1}")
@@ -245,17 +318,18 @@ def run(args, tracker):
                 "optimizer/loss_scale": scaler.get_scale(), "optimizer/cycle": cycle,
                 "perf/tokens_per_second": step_tokens / elapsed,
                 "perf/average_tokens_per_second": average_rate,
-                "perf/gpu_peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
-                "perf/gpu_reserved_gib": torch.cuda.memory_reserved() / 2**30,
+                "perf/gpu_peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0,
+                "perf/gpu_reserved_gib": torch.cuda.memory_reserved() / 2**30 if device.type == "cuda" else 0,
                 "perf/eta_hours": max(0, target_tokens - tokens_seen) / average_rate / 3600,
                 "progress/target_fraction": tokens_seen / target_tokens}, step, tokens_seen)
             LOG.info("step=%d loss=%.4f ppl=%.2f lr=%.3e grad_norm=%.3f tokens=%d tok/s=%.0f "
                      "peak_vram_gib=%.2f scale=%g eta_hours=%.1f", step, mean_loss,
                      math.exp(min(mean_loss, 20)), lr, float(grad_norm), tokens_seen,
-                     step_tokens / elapsed, torch.cuda.max_memory_allocated() / 2**30,
+                     step_tokens / elapsed, torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0,
                      scaler.get_scale(), max(0, target_tokens - tokens_seen) / average_rate / 3600)
         if config.eval_interval > 0 and step % config.eval_interval == 0:
-            tracker.validation(validation_report(model, index, config, device, step), tokens_seen)
+            tracker.validation(validation_report(model, index, config, device, step,
+                max_categories=pretraining.get("eval_categories", 12) if new_corpus else None), tokens_seen)
         if config.save_interval > 0 and step % config.save_interval == 0:
             save()
             last_saved = step

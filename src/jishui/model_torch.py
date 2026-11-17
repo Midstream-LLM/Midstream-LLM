@@ -1,6 +1,7 @@
 """PyTorch counterpart of model.py, with the same parameter names and RoPE."""
 from __future__ import annotations
 
+import math
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -97,6 +98,18 @@ class JishuiForCausalLM(nn.Module):
         x = self.norm(x)
         return (F.linear(x, self.embed_tokens.weight) if self.config.tie_word_embeddings
                 else self.lm_head(x))
+
+    def initialize_pretraining(self, std: float = 0.02) -> None:
+        """Explicit initialization for new runs; loading old checkpoints is unchanged."""
+        for module in self.modules():
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                nn.init.normal_(module.weight, mean=0.0, std=std)
+                if isinstance(module, nn.Linear) and module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        residual_std = std / math.sqrt(2 * self.config.num_hidden_layers)
+        for layer in self.layers:
+            nn.init.normal_(layer.attention.o_proj.weight, std=residual_std)
+            nn.init.normal_(layer.mlp.down_proj.weight, std=residual_std)
 
 
 def causal_lm_loss(model: JishuiForCausalLM, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
