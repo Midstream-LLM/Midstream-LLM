@@ -1,5 +1,104 @@
 # 使用中流语料库重新预训练 200M
 
+## 2026-11-18 块级打乱与固定验证
+
+配置：`configs/jishui-200m-corpus-date-open-v3-blocks.json`。数据仍使用
+`dataset/corpus-date-open-v3`，保留完整文档及原有 NPY，不重新导出或编码。
+`jishui.block_data` 在每个 epoch 的文档流上建立 2,048-token 目标区间，
+全局打乱区间索引。区间内部保持连续；短文之间插入 EOD；块末不足 2K 的目标
+保留，以 `-100` 屏蔽 padding。各微批次按有效目标数加权，token 计数不含
+padding 或只用于上下文/额外预测的后缀。日志 loss 为整个日志区间的 token 加权平均。
+
+接口分层：
+
+- `SampleSpec` 定义序列长度、预测偏移、EOD 和跨文档目标策略。
+- `DocumentStream` 以文档索引映射任意长度的连续窗口，不存储固定 2K 副本。
+- `TokenBatch` 提供原始连续 tokens、文档编号、有效目标长度、原始位置、位置编号
+  和段边界；数据层不构造平方大小的 attention mask。
+- `ShuffledBlockIterator` 缓存带校验和的排列，checkpoint 保存版本、数据身份、
+  seed、epoch、游标和迁移起点；恢复时拒绝不兼容配置。
+- `FixedValidation` 从验证集每个非空来源的整个范围分层抽取固定块，固定 seed，
+  报告各来源 loss，再按完整验证集的来源 token 量（含 EOD）加权。
+
+目前启用 NTP，沿用原有 EOD 分隔、允许跨文档 causal attention 的训练目标。
+`prediction_offsets=(1,2,...)` 的读取与目标 mask 已用合成数据测试：未来目标
+来自原文连续后缀，MTP 偏移默认屏蔽跨真实文档边界的位置。模型仍只实现 NTP，
+trainer 会拒绝开启 MTP，避免产生看似启用但没有对应训练目标的配置。
+数据接口通过 262,144-token 窗口测试；真正训练长上下文仍需模型位置编码、
+高效 attention、并行与评估实现，并非修改 `seq_len` 即完成。
+
+本轮固定验证预算为 128 块，覆盖 7 个已有验证来源。当前留出集没有 gutenberg、
+wanli、dongfang_ocr、shenbao_ocr，报告 `missing_training_sources` 明示这些缺口；
+不把训练数据挪入验证集。新旧验证口径不能直接比较，使用独立 run/看板实验。
+
+`--migrate-from <完整 CUDA checkpoint>` 只允许由旧 `document_stream` 显式迁移到
+新 run。保留权重、Adam、GradScaler、RNG、绝对步数、tokens 和余弦计划；依据
+旧 sampler 游标，只打乱当前 epoch 未读后缀，后续 epoch 再完整消费数据。
+数据、模型、优化器参数、预算和 schedule 必须匹配。迁移后只用 `--resume latest`。
+
+服务器部署目录：`deployments/corpus-blocks-v1-20261118/runtime`。
+训练 run：`runs/jishui-200m-corpus-date-open-v3-blocks`。
+CPU 回归命令：
+
+```bash
+CUDA_VISIBLE_DEVICES= PYTHONPATH=src .venv-torch/bin/python -m unittest \
+  tests.test_block_data tests.test_data tests.test_corpus_pretraining \
+  tests.test_torch_continuation tests.test_tracking tests.test_dashboard_push -v
+```
+
+`scripts/audit_block_sampling.py` 可在不加载模型、不解码正文的情况下核查迁移
+token 边界、全排列唯一性、批次文档混合及验证配额，参数见 `--help`。
+
+切换时旧 run 保存完整 `step_00016483`，本阶段累计 270,057,472 tokens。
+完整状态文件与 JSON 元数据、Adam step 一致。旧 systemd 服务停止时向整个
+进程组发信号，W&B 子进程退出后 checkpoint 指标回写报连接错误；checkpoint
+已先原子保存完成。新训练服务使用 `KillMode=mixed`，先只通知主进程收尾。
+部署目录的 `handover.json`、`tests.log`、`sampling-audit.json` 记录交接和核查。
+
+39 项服务器 CPU 测试及 20 步真实 CUDA 短测通过；短测保存完整
+`step_00016503` / 270,385,152 tokens，峰值显存 6.30 GiB，无梯度溢出。
+真实迁移初始 checkpoint 与父 checkpoint 的权重、Adam、GradScaler、CPU/CUDA RNG
+逐项完全相等。初始新口径验证 loss=4.4248（不得与旧前缀验证直接比较）。
+正式用户服务 `jishui-v3-blocks-train.service` 从短测完整状态恢复；
+`jishui-v3-blocks-dashboard.service` 每 30 秒推送独立实验
+`jishui-200m-corpus-date-open-v3-blocks`。两服务已启用，旧 v3 服务保持停止。
+
+```bash
+systemctl --user status jishui-v3-blocks-train.service
+systemctl --user status jishui-v3-blocks-dashboard.service
+# 正常停止会保存当前完整状态；再次启动从 latest 恢复。
+systemctl --user stop jishui-v3-blocks-train.service
+systemctl --user start jishui-v3-blocks-train.service
+```
+
+## 2026-11-18 年代宽筛发布
+
+release #3（`jishui-date-open-v3`）采用独立的 `exclude_known_late` 策略。
+沿用上限边界：1945 年起算后期。质量须为 `ok`；有结构化起年且起年
+≥1945 的记录排除。数字区间为空、唯一时代标签是 `dangdai` 的记录也排除。
+其他未知、无上界、跨界记录保留原值，没有填补推测年份。这里使用的是语料库现有的
+内容年代与标签，不能当作每篇已证实的成书年份。
+
+去重前 1,853,075 篇 / 3,790,472,201 字，复用文档簇与段落裁剪后为
+1,192,166 篇 / 2,445,261,333 字。train/val/test 分别为 1,173,683 /
+9,558 / 8,925 篇。验证和测试保留 release #2 已有留出组，其余组进入训练。
+旧训练与新留出集按文档、作品和重复簇核验；类别与来源变化后的模型评估应注明
+验证集仍以旧发布的留出组为主。语料准备与启动均校验日期策略、完整性和 tokenizer。
+
+配置为 `configs/jishui-200m-corpus-date-open-v3.json`。准备程序使用
+`--before-year 1945 --date-policy exclude_known_late --workers 6`。
+新 run 以旧 run 最终完整 checkpoint 的模型权重初始化，重新建立优化器和采样器；
+新阶段的 token 目标按原定 40 亿减去父 checkpoint 的已训练量计算。
+新旧 run 使用不同的输出目录和看板 ID。服务器独立部署目录
+`deployments/corpus-date-open-v3/` 保存实际配方、排除清单、校验及切换记录。
+
+实际交接（2026-11-18 UTC+8）：export #2 编码为 11 个 NPY，合计
+2,096,021,386 tokens（train 2,089,892,589，val 3,090,702，test 3,038,095）。
+训练 tokens 中，年份为空占 88.21%，跨界或不能判定上界早于 1945 占 0.58%。
+03:25:51 旧 run 保存完整 `step_00004384`，累计 71,827,456 tokens。
+新 run `jishui-200m-corpus-date-open-v3` 载入其权重，剩余预算 3,928,172,544
+tokens，学习率预热到 1e-4。新留出集初始验证 loss 为 5.1399。
+
 2026-11-17：训练与语料管理均使用 corpus 服务器。新数据准备、动态分类和独立
 PyTorch 训练入口已实现。服务器执行进展见下方 2026-11-18 记录。
 

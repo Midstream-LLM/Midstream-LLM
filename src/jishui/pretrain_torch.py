@@ -21,6 +21,7 @@ from .checkpoints import latest_checkpoint
 from .checkpoints_torch import import_mlx, load_checkpoint, load_model_weights, save_checkpoint
 from .config import load_run_config
 from .data import PackedBatchIterator, SequentialBatchIterator, ShuffledDocumentIterator, load_or_build_index, load_sampling_config
+from .block_data import SampleSpec, TokenBatch, ShuffledBlockIterator, FixedValidation
 from .model_torch import JishuiForCausalLM, causal_lm_loss
 from .schedules_torch import continuation_lr, make_continuation_schedule, make_pretraining_schedule
 from .tracking import ExperimentTracker
@@ -37,6 +38,10 @@ def natural_sampling(index) -> dict:
 
 
 def tensor_batch(batch, device):
+    if isinstance(batch, TokenBatch):
+        targets, _ = batch.targets(1)
+        return (torch.as_tensor(batch.input_ids, device=device),
+                torch.as_tensor(targets, device=device))
     tokens = torch.as_tensor(batch.astype(np.int64), device=device)
     return tokens[:, :-1], tokens[:, 1:]
 
@@ -63,7 +68,31 @@ def evaluate(model, index, config, device, category=None) -> float:
     return result
 
 
-def validation_report(model, index, config, device, step, max_categories=None):
+def validation_report(model, index, config, device, step, max_categories=None, fixed=None):
+    if fixed is not None:
+        sums, counts = {}, {}
+        model.eval()
+        try:
+            with torch.no_grad():
+                for source, batch in fixed:
+                    x, y = tensor_batch(batch, device)
+                    count = int((y != -100).sum())
+                    with autocast(device):
+                        loss = causal_lm_loss(model, x, y)
+                    sums[source] = sums.get(source, 0.0) + float(loss)*count
+                    counts[source] = counts.get(source, 0) + count
+        finally:
+            model.train()
+        means = {source: sums[source]/counts[source] for source in sums}
+        overall = fixed.weighted_mean(means)
+        if not all(math.isfinite(v) for v in [overall, *means.values()]):
+            raise FloatingPointError("non-finite validation loss")
+        by_source = {index.source_names[s]: v for s, v in means.items()}
+        LOG.info("validation step=%d loss=%.4f ppl=%.2f protocol=%s evaluated_tokens=%d per_source=%s",
+                 step, overall, math.exp(overall), fixed.metadata["fingerprint"], sum(counts.values()),
+                 json.dumps(by_source, sort_keys=True))
+        return {"step": step, "loss": overall, "per_category_loss": {}, "per_source_loss": by_source,
+                "evaluation": fixed.metadata, "evaluated_tokens": sum(counts.values())}
     overall = evaluate(model, index, config, device)
     categories = {}
     category_ids = index.category_ids
@@ -87,6 +116,8 @@ def parse_args():
     start = parser.add_mutually_exclusive_group()
     start.add_argument("--resume", help="exact MLX/CUDA checkpoint recovery, or latest")
     start.add_argument("--init-from", type=Path, help="initialize a NEW pretraining run from CUDA weights only")
+    start.add_argument("--migrate-from", type=Path,
+                       help="NEW run: retain full CUDA state; migrate unread document suffix to shuffled blocks")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="CPU float32 is for small validation runs")
     parser.add_argument("--steps", type=int, help="stop and save after this many updates (smoke test)")
     parser.add_argument("--evaluate-first", action="store_true")
@@ -118,12 +149,13 @@ def run(args, tracker):
     if config.seq_len > model_config.max_position_embeddings or config.eval_batches < 1:
         raise ValueError("invalid sequence length or evaluation batches")
     pretraining = raw.get("pretraining")
+    migrating = getattr(args, "migrate_from", None) is not None
     new_corpus = pretraining is not None
     continuation = raw.get("continuation")
     if new_corpus and continuation is not None:
         raise ValueError("choose pretraining or continuation, not both")
     if new_corpus:
-        if pretraining.get("schedule") != "cosine" or pretraining.get("sampling") not in {"natural", "target", "document_stream"}:
+        if pretraining.get("schedule") != "cosine" or pretraining.get("sampling") not in {"natural", "target", "document_stream", "shuffled_blocks"}:
             raise ValueError("unsupported pretraining schedule or sampling")
         if type(pretraining.get("eval_categories", 12)) is not int or pretraining.get("eval_categories", 12) < 0:
             raise ValueError("eval_categories must be a nonnegative integer")
@@ -133,6 +165,13 @@ def run(args, tracker):
         raise ValueError("unsupported continuation schedule")
     if getattr(args, "init_from", None) and not new_corpus:
         raise ValueError("--init-from requires a pretraining configuration")
+    block_mode = new_corpus and pretraining["sampling"] == "shuffled_blocks"
+    if migrating and (not block_mode or args.resume or getattr(args, "init_from", None)):
+        raise ValueError("--migrate-from requires a new shuffled-block pretraining run")
+    spec = SampleSpec(config.seq_len, tuple((pretraining or {}).get("prediction_offsets", [1])),
+                      config.eod_token_id)
+    if spec.prediction_offsets != (1,):
+        raise ValueError("MTP data interface is available, but this trainer currently implements NTP only")
     target_tokens = int((pretraining if new_corpus else continuation)["target_tokens"])
     if target_tokens <= 0:
         raise ValueError("target_tokens must be positive")
@@ -140,6 +179,8 @@ def run(args, tracker):
     checkpoint = (latest_checkpoint(args.run_dir) if args.resume == "latest" else Path(args.resume)) if args.resume else None
     if checkpoint is None and ((args.run_dir / "checkpoints").exists() or (args.run_dir / "resolved_config.json").exists()):
         raise ValueError("run directory already contains a run; use --resume latest or a new directory")
+    if migrating:
+        checkpoint = Path(args.migrate_from)
     source_meta = json.loads((checkpoint / "train_state.json").read_text()) if checkpoint else None
     if source_meta:
         for name in ("seq_len", "batch_size", "grad_accum_steps", "eod_token_id", "beta1", "beta2", "adam_eps", "weight_decay", "grad_clip"):
@@ -152,7 +193,8 @@ def run(args, tracker):
             raise ValueError("new corpus requires category_mode=labels and an explicit before_year")
         validate_training_data(args.data_dir, before_year=data_policy["before_year"],
                                vocab_size=model_config.vocab_size,
-                               tokenizer_sha256=data_policy.get("tokenizer_sha256"))
+                               tokenizer_sha256=data_policy.get("tokenizer_sha256"),
+                               date_policy=data_policy.get("date_policy", "strict_upper"))
     torch.manual_seed(config.seed)
     model = JishuiForCausalLM(model_config).to(device)
     if checkpoint is None:
@@ -178,6 +220,10 @@ def run(args, tracker):
             state["tracking"] = parent.get("tracking")
     step, tokens_seen = int(state["step"]), int(state["tokens_seen"])
     final_step = step + math.ceil((target_tokens - tokens_seen) / step_tokens)
+    if block_mode and native:
+        # Partial epoch-tail blocks reduce counted tokens, but must not move the
+        # saved cosine schedule on resume. Any final extra update uses the floor LR.
+        final_step = state["schedule"]["end_step"]
     if target_tokens <= tokens_seen:
         raise ValueError("checkpoint already reached the target token budget")
     config = replace(config, max_steps=final_step, compile_step=False)
@@ -186,13 +232,24 @@ def run(args, tracker):
     LOG.info("index=%s rebuilt=%s usable_train_tokens=%s", args.index_cache, rebuilt, index.token_totals("train"))
     if new_corpus:
         schedule = make_pretraining_schedule(config, final_step)
-        if pretraining["sampling"] == "document_stream":
-            sampling = {"mode": "document_stream"}
+        if pretraining["sampling"] in {"document_stream", "shuffled_blocks"}:
+            sampling = {"mode": pretraining["sampling"]}
+            if block_mode:
+                sampling["sample_spec"] = spec.identity()
         else:
             sampling = natural_sampling(index) if pretraining["sampling"] == "natural" else load_sampling_config(args.data_dir)
         if native:
-            for key, expected in (("pretraining", pretraining), ("schedule", schedule), ("sampling", sampling),
-                                  ("data_policy", data_policy), ("index_metadata", index.metadata)):
+            checks = [("schedule", schedule), ("data_policy", data_policy), ("index_metadata", index.metadata)]
+            if migrating:
+                if state.get("sampling") != {"mode": "document_stream"}:
+                    raise ValueError("migration only accepts the old document_stream sampler")
+                allowed = {"sampling", "prediction_offsets", "validation", "eval_categories"}
+                if ({k: v for k, v in state["pretraining"].items() if k not in allowed} !=
+                        {k: v for k, v in pretraining.items() if k not in allowed}):
+                    raise ValueError("migration changed pretraining budget or schedule")
+            else:
+                checks += [("pretraining", pretraining), ("sampling", sampling)]
+            for key, expected in checks:
                 if state.get(key) != expected:
                     raise ValueError(f"resume changed {key}; use --init-from for a new training run")
             if source_meta["training"]["seed"] != config.seed or source_meta["training"]["dtype"] != config.dtype:
@@ -220,13 +277,35 @@ def run(args, tracker):
             raise ValueError("continuation sampling must be natural or target")
         schedule = make_continuation_schedule(continuation, config, step, final_step,
                                               state["imported_learning_rate"])
-    if sampling.get("mode") == "document_stream":
+    if block_mode:
+        sampler = ShuffledBlockIterator(index, spec, config.batch_size, config.seed, args.run_dir / "sample_indices")
+    elif sampling.get("mode") == "document_stream":
         sampler = ShuffledDocumentIterator(index, config.seq_len, config.batch_size, config.seed, config.eod_token_id)
     else:
         sampler = PackedBatchIterator(index, sampling, config.seq_len, config.batch_size,
                                       config.seed, mode="target", eod_token_id=config.eod_token_id)
     if checkpoint:
-        sampler.load_state_dict(state["sampler"])
+        if migrating:
+            sampler.migrate_document_stream(state["sampler"])
+            state["data_migration"] = {"checkpoint": str(checkpoint.resolve()), "step": step,
+                "tokens_seen": tokens_seen, "from": "document_stream", "to": "shuffled_blocks",
+                "first_epoch": sampler.first_epoch, "first_offset": sampler.first_offset,
+                "remaining_epoch_targets": sampler.stream.size-sampler.first_offset,
+                "preserved": ["model", "optimizer", "scaler", "rng", "schedule", "token_budget"]}
+        else:
+            sampler.load_state_dict(state["sampler"])
+    fixed = None
+    validation = (pretraining or {}).get("validation")
+    if validation:
+        if validation.get("mode") != "source_stratified_blocks" or set(validation) - {"mode", "seed"}:
+            raise ValueError("unsupported validation configuration")
+        fixed = FixedValidation(index, spec, config.eval_batches, config.batch_size,
+                                validation.get("seed", config.seed))
+        if native and not migrating and state.get("evaluation") != fixed.metadata:
+            raise ValueError("resume changed validation sample protocol")
+        (args.run_dir / "validation_protocol.json").write_text(json.dumps(fixed.metadata, indent=2))
+        LOG.info("validation protocol=%s sources=%s missing_training_sources=%s", fixed.metadata["fingerprint"],
+                 list(fixed.metadata["sources"]), fixed.metadata["missing_training_sources"])
     LOG.info("resumed=%s step=%d tokens=%d final_step=%d target_tokens=%d sampling=%s schedule=%s",
              checkpoint, step, tokens_seen, final_step, target_tokens, sampling.get("target_mix", sampling), schedule)
     resolved = {"model": model_config.to_dict(), "training": config.to_dict(),
@@ -234,6 +313,10 @@ def run(args, tracker):
                 "origin": state.get("origin"), "index_metadata": index.metadata}
     if new_corpus:
         resolved.update(pretraining=pretraining, data_policy=data_policy)
+    if fixed:
+        resolved["evaluation"] = fixed.metadata
+    if state.get("data_migration"):
+        resolved["data_migration"] = state["data_migration"]
     (args.run_dir / "resolved_config.json").write_text(json.dumps(resolved, ensure_ascii=False, indent=2))
     tracker.start(dict(resolved, runtime={"torch": str(torch.__version__),
         "cuda": torch.version.cuda, "gpu": gpu_name,
@@ -241,7 +324,8 @@ def run(args, tracker):
         parent=state.get("tracking"))
     if args.evaluate_first or args.validate_only or args.expected_val_loss is not None:
         report = validation_report(model, index, config, device, step,
-                                   max_categories=pretraining.get("eval_categories", 12) if new_corpus else None)
+                                   max_categories=pretraining.get("eval_categories", 12) if new_corpus else None,
+                                   fixed=fixed)
         (args.run_dir / "initial_validation.json").write_text(json.dumps(report, indent=2))
         tracker.validation(report, tokens_seen)
         if args.expected_val_loss is not None and abs(report["loss"] - args.expected_val_loss) > args.val_tolerance:
@@ -257,11 +341,12 @@ def run(args, tracker):
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     last_saved = step
-    limit = min(final_step, step + args.steps) if args.steps else final_step
+    limit = step + args.steps if args.steps else (math.inf if block_mode else final_step)
+    window = dict(state.get("log_window", {"loss_sum": 0.0, "tokens": 0, "steps": 0}))
 
     def save():
         snapshot = dict(resolved, step=step, tokens_seen=tokens_seen, sampler=sampler.state_dict(),
-                        tracking=tracker.identity)
+                        tracking=tracker.identity, log_window=dict(window))
         saved = save_checkpoint(args.run_dir, snapshot, model, optimizer, scaler, config.max_checkpoints)
         LOG.info("saved checkpoint %s", saved)
         tracker.checkpoint(saved, step, tokens_seen)
@@ -273,21 +358,25 @@ def run(args, tracker):
 
     model.train()
     start_time, start_tokens = time.monotonic(), tokens_seen
-    while step < limit and not stop:
+    while step < limit and tokens_seen < target_tokens and not stop:
         before_sampler = copy.deepcopy(sampler.state_dict())
         update_start = time.monotonic()
         for attempt in range(8):
             sampler.load_state_dict(before_sampler)
             optimizer.zero_grad(set_to_none=True)
+            batches = [next(sampler) for _ in range(config.grad_accum_steps)]
+            counts = [int(batch.targets(1)[1].sum()) if isinstance(batch, TokenBatch)
+                      else config.seq_len*config.batch_size for batch in batches]
+            update_tokens = sum(counts)
             total_loss = 0.0
-            for _ in range(config.grad_accum_steps):
-                x, y = tensor_batch(next(sampler), device)
+            for batch, count in zip(batches, counts):
+                x, y = tensor_batch(batch, device)
                 with autocast(device):
                     loss = causal_lm_loss(model, x, y)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"non-finite loss before update {step + 1}")
-                total_loss += float(loss.detach())
-                scaler.scale(loss / config.grad_accum_steps).backward()
+                total_loss += float(loss.detach()) * count
+                scaler.scale(loss * (count / update_tokens)).backward()
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             lr = continuation_lr(schedule, step)
@@ -307,29 +396,34 @@ def run(args, tracker):
         else:
             raise FloatingPointError("gradient overflow persisted after 8 retries")
         step += 1
-        tokens_seen += step_tokens
+        tokens_seen += update_tokens
+        window["loss_sum"] += total_loss
+        window["tokens"] += update_tokens
+        window["steps"] += 1
         if step % config.log_interval == 0:
             elapsed = time.monotonic() - update_start
-            mean_loss = total_loss / config.grad_accum_steps
+            mean_loss = window["loss_sum"] / window["tokens"]
             average_rate = (tokens_seen - start_tokens) / (time.monotonic() - start_time)
             cycle = sum(step - 1 >= boundary for boundary in schedule.get("cycle_boundaries", [schedule["start_step"]])[1:-1]) + 1
             tracker.log({"train/loss": mean_loss, "train/perplexity": math.exp(min(mean_loss, 20)),
                 "optimizer/learning_rate": lr, "optimizer/grad_norm": float(grad_norm),
                 "optimizer/loss_scale": scaler.get_scale(), "optimizer/cycle": cycle,
-                "perf/tokens_per_second": step_tokens / elapsed,
+                "perf/tokens_per_second": update_tokens / elapsed,
                 "perf/average_tokens_per_second": average_rate,
                 "perf/gpu_peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0,
                 "perf/gpu_reserved_gib": torch.cuda.memory_reserved() / 2**30 if device.type == "cuda" else 0,
                 "perf/eta_hours": max(0, target_tokens - tokens_seen) / average_rate / 3600,
                 "progress/target_fraction": tokens_seen / target_tokens}, step, tokens_seen)
             LOG.info("step=%d loss=%.4f ppl=%.2f lr=%.3e grad_norm=%.3f tokens=%d tok/s=%.0f "
-                     "peak_vram_gib=%.2f scale=%g eta_hours=%.1f", step, mean_loss,
+                     "peak_vram_gib=%.2f scale=%g eta_hours=%.1f loss_steps=%d loss_tokens=%d", step, mean_loss,
                      math.exp(min(mean_loss, 20)), lr, float(grad_norm), tokens_seen,
-                     step_tokens / elapsed, torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0,
-                     scaler.get_scale(), max(0, target_tokens - tokens_seen) / average_rate / 3600)
+                     update_tokens / elapsed, torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0,
+                     scaler.get_scale(), max(0, target_tokens - tokens_seen) / average_rate / 3600,
+                     window["steps"], window["tokens"])
+            window = {"loss_sum": 0.0, "tokens": 0, "steps": 0}
         if config.eval_interval > 0 and step % config.eval_interval == 0:
             tracker.validation(validation_report(model, index, config, device, step,
-                max_categories=pretraining.get("eval_categories", 12) if new_corpus else None), tokens_seen)
+                max_categories=pretraining.get("eval_categories", 12) if new_corpus else None, fixed=fixed), tokens_seen)
         if config.save_interval > 0 and step % config.save_interval == 0:
             save()
             last_saved = step

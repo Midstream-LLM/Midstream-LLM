@@ -87,6 +87,8 @@ class ExperimentTracker:
         for category, loss in report["per_category_loss"].items():
             metrics[f"val/c{category}_loss"] = loss
             metrics[f"val/c{category}_perplexity"] = math.exp(min(loss, 20))
+        for source, loss in report.get("per_source_loss", {}).items():
+            metrics[f"val/source/{source}_loss"] = loss
         self.log(metrics, report["step"], tokens)
 
     def checkpoint(self, path: Path, step: int, tokens: int) -> None:

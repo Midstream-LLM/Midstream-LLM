@@ -100,6 +100,26 @@ class CorpusPretrainingTests(unittest.TestCase):
         self.assertFalse((self.root / "data").exists())
         self.assertFalse(list(self.root.glob(".data-*")))
 
+    def test_open_date_policy_and_parallel_encoding(self):
+        self.records.extend([self.record(8, "test", None, 1950, None, "庚"),
+                             self.record(9, "test", None, None, None, "辛")])
+        for row in self.records:
+            row["tags"] = []
+        self.records[-1]["tags"] = [{"taxonomy": "era", "tag_id": "dangdai"}]
+        self.records[4]["tags"] = [{"taxonomy": "era", "tag_id": "minguo"},
+                                   {"taxonomy": "era", "tag_id": "dangdai"}]
+        self.write_export()
+        policy = "exclude_known_late"
+        a, b = self.root / "serial", self.root / "parallel"
+        serial = prepare(self.export, a, self.tokenizer_path, date_policy=policy)
+        parallel = prepare(self.export, b, self.tokenizer_path, date_policy=policy, workers=2)
+        self.assertEqual(serial, parallel)
+        self.assertEqual(serial["documents"], 5)
+        self.assertEqual(serial["excluded"], {"at_or_after_cutoff": 3, "contemporary_era_tag": 1})
+        validate_training_data(b, before_year=1945, vocab_size=19, date_policy=policy)
+        with self.assertRaisesRegex(ValueError, "date policy"):
+            validate_training_data(b, before_year=1945, vocab_size=19)
+
     def test_dynamic_categories_and_unknown_are_sampled(self):
         data, _ = self.prepare()
         index = build_pretrain_index(data, category_mode="labels")
@@ -169,12 +189,18 @@ class CorpusPretrainingTests(unittest.TestCase):
         path.write_text(json.dumps(config))
         return path
 
-    def train(self, data, name, *, steps=None, resume=None, init_from=None):
+    def train(self, data, name, *, steps=None, resume=None, init_from=None, block=False, migrate_from=None):
         directory = self.root / name
         directory.mkdir(exist_ok=True)
-        args = SimpleNamespace(config=self.config(), run_dir=directory, data_dir=data, index_cache=None,
+        config_path = self.config()
+        if block:
+            spec = json.loads(config_path.read_text())
+            spec["pretraining"].update(sampling="shuffled_blocks", prediction_offsets=[1],
+                                       validation={"mode": "source_stratified_blocks", "seed": 71})
+            config_path.write_text(json.dumps(spec))
+        args = SimpleNamespace(config=config_path, run_dir=directory, data_dir=data, index_cache=None,
             resume=resume, init_from=init_from, device="cpu", steps=steps, evaluate_first=True,
-            validate_only=False, expected_val_loss=None, val_tolerance=.03)
+            validate_only=False, expected_val_loss=None, val_tolerance=.03, migrate_from=migrate_from)
         run(args, ExperimentTracker(directory))
         latest = json.loads((directory / "latest.json").read_text())["checkpoint"]
         return Path(latest), torch.load(Path(latest) / "training.pt", weights_only=True)
@@ -209,6 +235,41 @@ class CorpusPretrainingTests(unittest.TestCase):
         self.assertAlmostEqual(rates[0], config.learning_rate / 2)
         self.assertAlmostEqual(rates[1], config.learning_rate)
         self.assertAlmostEqual(rates[-1], config.min_learning_rate)
+
+    def test_block_training_exact_resume_with_partial_blocks(self):
+        data, _ = self.prepare()
+        _, full = self.train(data, "block-full", block=True)
+        self.train(data, "block-resume", block=True, steps=3)
+        _, resumed = self.train(data, "block-resume", block=True, resume="latest")
+        for key in full["model"]:
+            torch.testing.assert_close(full["model"][key], resumed["model"][key], rtol=0, atol=0)
+        for key in ("sampler", "tokens_seen", "schedule", "evaluation", "log_window"):
+            self.assertEqual(full["state"][key], resumed["state"][key])
+        self.assertEqual(full["state"]["evaluation"]["version"], "source_stratified_blocks_v1")
+
+    def test_full_state_migration_preserves_adam_schedule_and_rng(self):
+        data, _ = self.prepare()
+        parent_path, parent = self.train(data, "parent", steps=3)
+        _, child = self.train(data, "blocks", block=True, migrate_from=parent_path, steps=1)
+        migrated = torch.load(self.root / "blocks/checkpoints/step_00000003/training.pt", weights_only=True)
+        for key in parent["model"]:
+            torch.testing.assert_close(parent["model"][key], migrated["model"][key], rtol=0, atol=0)
+        for pid, state in parent["optimizer"]["state"].items():
+            for key in state:
+                torch.testing.assert_close(state[key], migrated["optimizer"]["state"][pid][key], rtol=0, atol=0)
+        self.assertEqual(parent["optimizer"]["param_groups"], migrated["optimizer"]["param_groups"])
+        self.assertEqual(parent["scaler"], migrated["scaler"])
+        torch.testing.assert_close(parent["rng"], migrated["rng"], rtol=0, atol=0)
+        for key in ("step", "tokens_seen", "schedule"):
+            self.assertEqual(parent["state"][key], migrated["state"][key])
+        self.assertEqual(child["state"]["step"], 4)
+        self.assertEqual(child["state"]["sampler"]["kind"], "shuffled_blocks")
+        self.assertGreater(child["state"]["tokens_seen"], parent["state"]["tokens_seen"])
+        for state in child["optimizer"]["state"].values():
+            self.assertEqual(state["step"].item(), 4)
+        # Exact resume cannot silently apply a sampler migration.
+        with self.assertRaisesRegex(ValueError, "resume changed"):
+            self.train(data, "parent", block=True, resume="latest", steps=1)
 
 
 if __name__ == "__main__":

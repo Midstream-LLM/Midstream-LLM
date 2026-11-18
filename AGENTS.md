@@ -94,3 +94,16 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 - 服务器根目录 `/media/sidi762/b41354bc-9442-475d-9c51-ad8d110f2139/Jishui`；本轮代码快照 `deployments/corpus-pre1945-20261118`，数据 `dataset/corpus-pre1945-v2`，run `runs/jishui-200m-corpus-pre1945`。28 项测试和 20 步 CUDA 短测通过，完整保存 step 20 后启动正式恢复训练；从零初始化，目标 4B tokens，fp16 AMP，峰值显存 6.31 GiB。
 - 用户已授权暂停 Qwen llama-server 以释放 3060；重启参数保存在部署目录 `qwen-paused.json`。本轮操作记录与复现见 `docs/corpus-pretraining.md`。4B 旧实验保持结束状态。
 - W&B 在线返回 403，本轮使用 offline 模式保留指标；独立在线训练看板 `https://www.fgprc.org.cn/training` 已通过用户服务 `jishui-corpus-pre1945-dashboard.service` 每 30 秒持续推送，runId 为 `jishui-200m-corpus-pre1945`。
+
+## 当前单卡训练（2026-11-18，优先于前节）
+- 用户改为排除明确后期、保留未知及跨界。新发布 release #3 / export #2，数据目录 `dataset/corpus-date-open-v3`，1,192,166 篇 / 2,096,021,386 tokens。规则及核查详见 `docs/corpus-pretraining.md`。
+- 旧严格口径 run 已在 step 4,384 / 71,827,456 tokens 保存完整 checkpoint 并停止。新 run `jishui-200m-corpus-date-open-v3` 从该权重启动，重建优化器和采样器，剩余预算 3,928,172,544 tokens。训练用户服务 `jishui-v3-train.service`，看板用户服务 `jishui-v3-dashboard.service`，服务器部署目录 `deployments/corpus-date-open-v3/`。
+
+## 块级打乱续训（2026-11-18，优先于前节）
+- 用户批准修复长书连续采样及验证前缀偏差。新模块 `src/jishui/block_data.py` 保留完整文档 NPY，以 2K + NTP 的全局块排列训练；尾块 mask、有效 token 加权、确定性恢复均已实现。训练 loss 为日志区间平均。
+- 已预留可变长度、预测偏移、文档/段边界及 lookahead 接口；通过 256K 数据窗口和 MTP 目标 mask 测试。**模型尚未实现 MTP 或 128K attention/位置编码方案**，trainer 明确拒绝开启非 NTP 目标。
+- 固定验证从所有 7 个已有验证来源全范围分层抽 128 块（259,906 个有效 tokens），逐来源评估并按完整留出集来源 token 量加权。gutenberg、wanli、dongfang_ocr、shenbao_ocr 没有留出数据，报告明确记录，不挪用训练集。
+- 旧 v3 run 在完整 checkpoint `step_00016483` / 270,057,472 tokens 停止。新 run `runs/jishui-200m-corpus-date-open-v3-blocks` 通过 `--migrate-from` 保留权重、Adam、GradScaler、RNG、学习率和原预算，仅重排当前 epoch 未读后缀；后续使用 `--resume latest`。
+- 部署 `deployments/corpus-blocks-v1-20261118/runtime`；配置 `configs/jishui-200m-corpus-date-open-v3-blocks.json`。39 项服务器 CPU 测试、20 步 CUDA 短测通过；完整保存 `step_00016503` 后启动正式恢复。真实迁移前后权重/Adam/Scaler/CPU+CUDA RNG 已逐项相等核验。
+- 用户服务 `jishui-v3-blocks-train.service`、`jishui-v3-blocks-dashboard.service` 已启用，独立看板 runId `jishui-200m-corpus-date-open-v3-blocks`。旧 v3 训练及推送已停止；旧实验不重启。训练服务使用 `KillMode=mixed`，避免停止时 W&B 子进程先退出导致保存后的指标回写报错。
+- 交接和复现见 `docs/corpus-pretraining.md`；部署目录保存 `handover.json`、`tests.log`、`sampling-audit.json`、`code-manifest.json`。

@@ -119,12 +119,17 @@ class LogFeed:
         state = self.state
         if state == 'live' and time.time()-row['stamp'].timestamp() > 180:
             state = 'paused'
+        open_dates = self.config.get('data_policy', {}).get('date_policy') == 'exclude_known_late'
+        run_name = '200M · 年代宽筛' if open_dates else ('200M · 1945年前语料' if pretraining else '200M → 4B tokens')
+        if self.config.get('sampling', {}).get('mode') == 'shuffled_blocks':
+            run_name += ' · 分块打乱'
+        dataset = '中流语料库 · 排除明确后期，保留年代未知' if open_dates else ('中流语料库 · 成书年代上界 < 1945' if pretraining else '古汉语混合语料')
         return dict(
-            title='击水 · 200M', subtitle='古汉语原生语言模型 · 从零预训练',
-            runId=self.run.name, runName=('200M · 1945年前语料' if pretraining else '200M → 4B tokens'), runUrl=wandb.get('url') or '',
+            title='击水 · 200M', subtitle='古汉语原生语言模型 · 继续预训练' if open_dates else '古汉语原生语言模型 · 从零预训练',
+            runId=self.run.name, runName=run_name, runUrl=wandb.get('url') or '',
             startedAt=self.started_at.isoformat() if self.started_at else row['stamp'].isoformat(),
             status=state, timestamp=row['stamp'].isoformat(),
-            config=dict(model='击水 200M', dataset=('中流语料库 · 成书年代上界 < 1945' if pretraining else '古汉语混合语料'), batchSize=train['batch_size']*train['grad_accum_steps'],sequenceLength=train['seq_len']),
+            config=dict(model='击水 200M', dataset=dataset, batchSize=train['batch_size']*train['grad_accum_steps'],sequenceLength=train['seq_len']),
             progress=dict(step=row['step'],tokens=row['tokens'],targetTokens=target),
             metrics={**{key:row[key] for key in KEYS.values()},'valLoss':self.validation},
             charts={key:sample([dict(step=step,value=value) for step,value in sorted(history.items())]) for key,history in self.history.items()},

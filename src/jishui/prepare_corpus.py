@@ -9,9 +9,12 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import multiprocessing
 import shutil
 import tempfile
-from collections import Counter
+from collections import Counter, deque
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +22,7 @@ import numpy as np
 
 FORMAT = "jishui-midstream-v1"
 REQUIRED_FIELDS = {"doc_id", "version_id", "split", "text", "source", "category", "composed_years"}
+DATE_POLICIES = ("strict_upper", "exclude_known_late")
 
 
 def sha256(path):
@@ -45,6 +49,88 @@ def date_reason(value, before_year):
     if end >= before_year:
         return "crosses_cutoff" if start is None or start < before_year else "at_or_after_cutoff"
     return None
+
+
+def exclusion(record, before_year, policy):
+    value = record["composed_years"]
+    reason = date_reason(value, before_year)
+    if policy == "strict_upper":
+        return reason
+    if policy != "exclude_known_late":
+        raise ValueError(f"unknown date policy: {policy}")
+    if value and value.get("start_year") is not None and value["start_year"] >= before_year:
+        return "at_or_after_cutoff"
+    eras = {t["tag_id"] for t in record["tags"] if t.get("taxonomy") == "era"}
+    if value is None and eras == {"dangdai"}:
+        return "contemporary_era_tag"
+    return None
+
+
+def _encoder(tokenizer_bytes):
+    from opencc import OpenCC
+    from tokenizers import Tokenizer
+    backend = Tokenizer.from_str(tokenizer_bytes.decode("utf-8"))
+    backend.no_padding()
+    backend.no_truncation()
+    return OpenCC("t2s"), backend
+
+
+def _init_worker(tokenizer_bytes):
+    global _worker_encoder
+    _worker_encoder = _encoder(tokenizer_bytes)
+
+
+def _encode_rows(rows, before_year, policy, dtype, encoder=None):
+    converter, backend = encoder or _worker_encoder
+    result = []
+    for record in rows:
+        reason = exclusion(record, before_year, policy)
+        text = record.pop("text")
+        if not isinstance(text, str):
+            raise ValueError("export text must be a string")
+        ids, digest = (), None
+        if reason is None:
+            text = converter.convert(text)
+            ids = np.asarray(backend.encode(text, add_special_tokens=False).ids, dtype=dtype)
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if not len(ids):
+                reason = "zero_tokens"
+        result.append((record, reason, ids, digest))
+    return result
+
+
+def _batches(rows, fields):
+    batch, chars = [], 0
+    for row in rows:
+        if fields - row.keys():
+            raise ValueError("record is missing required export fields")
+        batch.append(row)
+        chars += len(row["text"])
+        if chars >= 120_000 or len(batch) >= 256:
+            yield batch
+            batch, chars = [], 0
+    if batch:
+        yield batch
+
+
+def _encoded(batches, pool, workers, args, encoder):
+    if pool is None:
+        for batch in batches:
+            yield from _encode_rows(batch, *args, encoder=encoder)
+        return
+    pending = deque()
+    for batch in batches:
+        if any(len(row["text"]) > 1_000_000 for row in batch):
+            # A single book can take gigabytes of temporary tokenizer memory.
+            while pending:
+                yield from pending.popleft().result()
+            yield from pool.submit(_encode_rows, batch, *args).result()
+            continue
+        pending.append(pool.submit(_encode_rows, batch, *args))
+        if len(pending) >= workers * 2:
+            yield from pending.popleft().result()
+    for future in pending:
+        yield from future.result()
 
 
 def read_rows(path, format):
@@ -94,9 +180,11 @@ class TokenWriter:
         return shard, offset
 
 
-def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_tokens=200_000_000):
-    from opencc import OpenCC
-    from tokenizers import Tokenizer
+def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_tokens=200_000_000,
+            date_policy="strict_upper", workers=1):
+    if date_policy not in DATE_POLICIES or workers < 1:
+        raise ValueError("invalid date policy or worker count")
+    fields = REQUIRED_FIELDS | ({"tags"} if date_policy == "exclude_known_late" else set())
 
     export_dir, output_dir, tokenizer_path = map(Path, (export_dir, output_dir, tokenizer_path))
     if tokenizer_path.is_dir():
@@ -112,7 +200,7 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
         raise ValueError("export uncompressed JSONL or Parquet (not the raw-body tokens export)")
     if source.get("unit") != "document":
         raise ValueError("export complete documents so template prefixes and splits remain intact")
-    if missing := REQUIRED_FIELDS - set(source.get("fields", [])):
+    if missing := fields - set(source.get("fields", [])):
         raise ValueError(f"export is missing required fields: {sorted(missing)}")
     files = source.get("files", [])
     if not files:
@@ -130,14 +218,12 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
     tokenizer_spec = json.loads(tokenizer_bytes)
     if tokenizer_spec.get("model", {}).get("dropout"):
         raise ValueError("stochastic tokenizer dropout is unsupported")
-    backend = Tokenizer.from_str(tokenizer_bytes.decode("utf-8"))
-    backend.no_padding()
-    backend.no_truncation()
+    encoder = _encoder(tokenizer_bytes)
+    backend = encoder[1]
     vocab_size = backend.get_vocab_size(with_added_tokens=True)
     if max(backend.get_vocab(with_added_tokens=True).values()) >= vocab_size:
         raise ValueError("token IDs must lie within vocab_size")
     dtype = np.dtype("<u2" if vocab_size <= 65536 else "<u4")
-    converter = OpenCC("t2s")
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
     writer = TokenWriter(temporary, dtype, shard_tokens)
@@ -148,29 +234,27 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
         (temporary / "manifest").mkdir()
         (temporary / "reports").mkdir()
         docs_path = temporary / "manifest/docs_tokens.jsonl"
-        with docs_path.open("w", encoding="utf-8") as docs, (temporary / "reports/excluded.jsonl").open("w", encoding="utf-8") as excluded:
+        with ExitStack() as stack:
+            docs = stack.enter_context(docs_path.open("w", encoding="utf-8"))
+            excluded = stack.enter_context((temporary / "reports/excluded.jsonl").open("w", encoding="utf-8"))
+            pool = stack.enter_context(ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"), initializer=_init_worker,
+                       initargs=(tokenizer_bytes,))) if workers > 1 else None
             for item, path in zip(files, paths):
                 rows = 0
-                for record in read_rows(path, source["format"]):
+                batches = _batches(read_rows(path, source["format"]), fields)
+                for record, reason, ids, text_digest in _encoded(batches, pool, workers, (before_year, date_policy, dtype), encoder):
                     rows += 1
-                    if REQUIRED_FIELDS - record.keys():
-                        raise ValueError("record is missing required export fields")
                     doc_id, split = record["doc_id"], record["split"]
                     if doc_id in seen:
                         raise ValueError(f"duplicate document in export: {doc_id}")
                     seen.add(doc_id)
                     if split not in by_split or split != item["split"]:
                         raise ValueError("record split differs from frozen export")
-                    if not isinstance(record["text"], str) or not isinstance(record["source"], str) or not record["source"]:
-                        raise ValueError("export text and source must be strings; source must be nonempty")
+                    if not isinstance(record["source"], str) or not record["source"]:
+                        raise ValueError("export source must be a nonempty string")
                     counts["input_documents"] += 1
                     source_counts = by_source.setdefault(record["source"], Counter())
                     source_counts["input_documents"] += 1
-                    reason = date_reason(record["composed_years"], before_year)
-                    text = converter.convert(record["text"]) if reason is None else ""
-                    ids = backend.encode(text, add_special_tokens=False).ids if reason is None else []
-                    if reason is None and not ids:
-                        reason = "zero_tokens"
                     if reason:
                         rejected[reason] += 1
                         source_counts[reason] += 1
@@ -179,9 +263,9 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
                             "reason": reason}, ensure_ascii=False) + "\n")
                         continue
                     shard, offset = writer.write(ids)
-                    entry = {k: v for k, v in record.items() if k != "text"}
+                    entry = record
                     entry.update(tokens=len(ids), shard=shard, offset=offset,
-                                 training_text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+                                 training_text_sha256=text_digest)
                     docs.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
                     counts["documents"] += 1
                     counts["tokens"] += len(ids)
@@ -191,12 +275,15 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
                     by_split[split]["tokens"] += len(ids)
                 if rows != item["rows"] or sha256(path) != item["sha256"]:
                     raise ValueError(f"export changed or row count mismatch: {item['file']}")
+                if workers > 1:
+                    print(f"Encoded {item['file']}: {rows} rows; {counts['tokens']:,} total tokens", flush=True)
         writer.close_shard()
         if not by_split["train"]["documents"] or not by_split["val"]["documents"]:
             raise ValueError("date filtering must leave both training and validation documents")
         if sha256(manifest_path) != source_digest:
             raise ValueError("export manifest changed during preparation")
-        output = {"format": FORMAT, "before_year": before_year, "unknown_years": "exclude",
+        output = {"format": FORMAT, "before_year": before_year, "date_policy": date_policy,
+            "unknown_years": "exclude" if date_policy == "strict_upper" else "include",
             "category_mode": "labels", "vocab_size": vocab_size, "dtype": dtype.str,
             "tokenizer_sha256": hashlib.sha256(tokenizer_bytes).hexdigest(),
             "add_special_tokens": False, "padding": False, "truncation": False,
@@ -220,10 +307,12 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
         raise
 
 
-def validate_training_data(data_dir, *, before_year, vocab_size, tokenizer_sha256=None):
+def validate_training_data(data_dir, *, before_year, vocab_size, tokenizer_sha256=None, date_policy="strict_upper"):
     """Run before model allocation, including every resume of the new trainer."""
     root = Path(data_dir)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    if date_policy not in DATE_POLICIES or manifest.get("date_policy", "strict_upper") != date_policy:
+        raise ValueError("training data date policy differs from configuration")
     if manifest.get("format") != FORMAT or manifest.get("before_year") != before_year:
         raise ValueError("training data must be prepared with the configured exclusive year cutoff")
     if manifest.get("vocab_size") != vocab_size:
@@ -239,7 +328,7 @@ def validate_training_data(data_dir, *, before_year, vocab_size, tokenizer_sha25
     with (root / "manifest/docs_tokens.jsonl").open(encoding="utf-8") as handle:
         for line in handle:
             record = json.loads(line)
-            if date_reason(record.get("composed_years"), before_year):
+            if exclusion(record, before_year, date_policy):
                 raise ValueError(f"document {record['doc_id']} violates the training year cutoff")
     return manifest
 
@@ -250,10 +339,13 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--before-year", type=int, default=1945)
+    parser.add_argument("--date-policy", choices=DATE_POLICIES, default="strict_upper")
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--shard-tokens", type=int, default=200_000_000)
     args = parser.parse_args()
     result = prepare(args.export_dir, args.output_dir, args.tokenizer,
-                     before_year=args.before_year, shard_tokens=args.shard_tokens)
+                     before_year=args.before_year, shard_tokens=args.shard_tokens,
+                     date_policy=args.date_policy, workers=args.workers)
     print(json.dumps({k: result[k] for k in ("documents", "tokens", "by_split", "excluded")}, ensure_ascii=False, indent=2))
 
 
