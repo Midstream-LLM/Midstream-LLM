@@ -45,7 +45,7 @@
     "compile_step": false
   },
   "pretraining": {
-    "target_tokens": 4180100928,
+    "target_tokens": 8364265088,
     "schedule": "cosine",
     "sampling": "shuffled_blocks",
     "eval_categories": 0,

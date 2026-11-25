@@ -110,4 +110,4 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 
 ## 文档内注意力隔断 + 8×V100 DDP（2026-11-25，优先于前节）
 - 32K 基座 SFT 不如 2K，疑因更新次数少（15,946 步）与跨文档注意力。新增 `pretraining.attention: "document"`（默认 causal，SFT/推理不变）与 torchrun DDP（仅 shuffled_blocks；全局同一 sampler 按行切分，checkpoint 与单进程等价）。
-- 配置 `configs/jishui-200m-v3-docmask-8xv100.json`（2K、全局 65,536 tokens/步、Muon+AdamW、lr 5e-4、4.18B tokens、从零；`pretraining.optimizer`，实现在 `src/jishui/optim_torch.py`）；启动 `bash scripts/train_8xv100_docmask.sh smoke|start|resume`。细节、测试与核对项见 `docs/doc-attention-8xv100.md`。V100 上未实测，先跑 smoke。
+- 配置 `configs/jishui-200m-v3-docmask-8xv100.json`（2K、全局 65,536 tokens/步、Muon+AdamW、lr 5e-4、4 epoch = 8,364,265,088 tokens / 127,629 次更新、从零；`pretraining.optimizer`，实现在 `src/jishui/optim_torch.py`）；启动 `bash scripts/train_8xv100_docmask.sh smoke|start|resume`。细节、测试与核对项见 `docs/doc-attention-8xv100.md`。V100 上未实测，先跑 smoke。

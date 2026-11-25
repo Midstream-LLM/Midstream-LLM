@@ -58,7 +58,11 @@ Release3 32K 基座（step 15,946）做 SFT 后不如 2K 基座。两个基座�
 
 - 模型与 2K 基座相同：200M，2048 上下文，RoPE θ=1e4。从零开始训练。
 - 每卡 batch 4 × 2048，accum 1，全局每步 65,536 tokens。
-- 预算 4,180,100,928 tokens（与 32K run 相同，约 2 epoch），约 63,784 次更新，是 32K run 的 4 倍。
+- 预算 8,364,265,088 tokens，**4 个 epoch**，共 127,629 次更新，约为 32K run 的 8 倍；约每参数 41.8 个 token。
+  - 每个 epoch 的目标 token 数 = 训练集 2,089,892,589 tokens + 每篇一个 EOD（约 1,173,683 篇；篇数由总篇数减去验证集 9,558 篇和测试集 8,925 篇推得）= 2,091,066,272，乘 4 得到预算。
+  - 选 4 轮的依据：去重后训练数据只有 20.9 亿 tokens；Muennighoff 等（2023）发现重复训练到约 4 轮，效果接近用新数据，超过后收益明显下降。原先继承的 4,180,100,928 只有 1.999 轮，约每参数 21 个 token。
+  - **正式开训前要核对**：smoke 日志里 `usable_train_tokens` 和训练集篇数应与上面一致。如果不一致，把 `target_tokens` 改成 4 ×（训练 tokens + 训练篇数）。这一步必须在 start 之前做，开训后改预算会被 resume 拒绝。
+  - 余弦日程按 127,629 次更新自动展开，warmup 1000 次，占 0.8%。用 32K run 的速度推算约需 2 天，2K 窗口应会更快，以 smoke 实测的 tok/s 为准。
 - Muon（momentum 0.95，Nesterov，5 步）+ AdamW（embedding 和 norm），峰值学习率 5e-4 → 5e-5 cosine，warmup 1000，weight decay 0.1，fp16 AMP + GradScaler。因为 Muon 的更新幅度已和 AdamW 对齐，5e-4 沿用的是 AdamW 的量级。**这是第一次在本项目里用 Muon，前几千步要盯紧 loss 和 grad_norm。** 如果发散，先把学习率降到 3e-4 重新开始。
 - 固定验证：`eval_batches 32 × batch 4 = 128` 块，seed 20261118，SampleSpec 与 2K blocks run 相同，所以验证协议指纹应当一致，可以直接和 2K run 的 3.237 比较。**启动日志里打印的 protocol 指纹要核对一下。**
 - 显存估计：每卡约 15 GiB（3060 上 batch 1 的峰值是 6.3 GiB）。如果 OOM，把 `batch_size` 改成 2、`grad_accum_steps` 改成 2，全局 batch 不变；但验证块数会跟着变，需要同时把 `eval_batches` 改成 64。
