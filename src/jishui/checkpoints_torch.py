@@ -66,6 +66,25 @@ def import_mlx(path: Path, model, optimizer) -> dict:
     return state
 
 
+def _distributed() -> bool:
+    return torch.distributed.is_available() and torch.distributed.is_initialized()
+
+
+def cuda_rng_state() -> list:
+    """All devices for a single process; only this rank's device under DDP, so
+    rank 0 does not open CUDA contexts on every GPU."""
+    if not torch.cuda.is_available():
+        return []
+    return [torch.cuda.get_rng_state()] if _distributed() else torch.cuda.get_rng_state_all()
+
+
+def set_cuda_rng_state(states: list) -> None:
+    if _distributed() or len(states) != torch.cuda.device_count():
+        torch.cuda.set_rng_state(states[0])
+    else:
+        torch.cuda.set_rng_state_all(states)
+
+
 def save_checkpoint(run_dir: Path, state: dict, model, optimizer, scaler, keep: int = 3) -> Path:
     root = run_dir / "checkpoints"
     root.mkdir(parents=True, exist_ok=True)
@@ -78,7 +97,7 @@ def save_checkpoint(run_dir: Path, state: dict, model, optimizer, scaler, keep: 
         "format_version": 1, "model": model.state_dict(),
         "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
         "rng": torch.get_rng_state(),
-        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        "cuda_rng": cuda_rng_state(),
         "state": state,
     }
     with (temporary / "training.pt").open("wb") as handle:
@@ -108,7 +127,7 @@ def load_checkpoint(path: Path, model, optimizer, scaler) -> dict:
     scaler.load_state_dict(bundle["scaler"])
     torch.set_rng_state(bundle["rng"])
     if bundle["cuda_rng"]:
-        torch.cuda.set_rng_state_all(bundle["cuda_rng"])
+        set_cuda_rng_state(bundle["cuda_rng"])
     return state
 
 

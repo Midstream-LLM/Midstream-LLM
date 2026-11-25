@@ -1,4 +1,11 @@
-"""Single-GPU pretraining, new-corpus initialization and exact continuation."""
+"""Pretraining, new-corpus initialization and exact continuation.
+
+One GPU: ``python -m jishui.pretrain_torch``. Several GPUs (shuffled_blocks
+only): ``torchrun --nproc_per_node=N -m jishui.pretrain_torch``. Every rank
+draws the same global micro-batch (batch_size * world_size rows) from one
+deterministic sampler and keeps its own row slice, so sampler state, token
+counts and checkpoints are identical to a single process reading that batch.
+"""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 
 from .checkpoints import latest_checkpoint
 from .checkpoints_torch import import_mlx, load_checkpoint, load_model_weights, save_checkpoint
@@ -37,13 +46,49 @@ def natural_sampling(index) -> dict:
     return {"target_mix": {str(k): v / total for k, v in totals.items()}}
 
 
-def tensor_batch(batch, device):
+ATTENTION_MODES = ("causal", "document")
+
+
+def world():
+    return (dist.get_rank(), dist.get_world_size()) if dist.is_initialized() else (0, 1)
+
+
+def barrier():
+    if dist.is_initialized():
+        dist.barrier()
+
+
+def rows(batch, rank, size):
+    """This rank's contiguous slice of a global TokenBatch."""
+    if size == 1:
+        return batch
+    n = len(batch.tokens) // size
+    part = slice(rank*n, (rank+1)*n)
+    return TokenBatch(batch.tokens[part], batch.document_ids[part], batch.target_counts[part],
+                      batch.target_starts[part], batch.spec)
+
+
+def segment_ids(batch):
+    """Attention segment of each input position = document of its target.
+
+    EOD belongs to the document it ends, so the EOD input position joins the
+    next document and acts as its BOS; a document never attends to another.
+    Padding (-1) only attends to padding and is never a target.
+    """
+    return batch.document_ids[:, 1:batch.spec.seq_len+1]
+
+
+def tensor_batch(batch, device, document_attention=False):
     if isinstance(batch, TokenBatch):
         targets, _ = batch.targets(1)
+        segments = (torch.as_tensor(np.ascontiguousarray(segment_ids(batch)), device=device)
+                    if document_attention else None)
         return (torch.as_tensor(batch.input_ids, device=device),
-                torch.as_tensor(targets, device=device))
+                torch.as_tensor(targets, device=device), segments)
+    if document_attention:
+        raise ValueError("document attention requires shuffled_blocks batches")
     tokens = torch.as_tensor(batch.astype(np.int64), device=device)
-    return tokens[:, :-1], tokens[:, 1:]
+    return tokens[:, :-1], tokens[:, 1:], None
 
 
 def autocast(device):
@@ -57,7 +102,7 @@ def evaluate(model, index, config, device, category=None) -> float:
                                        config.eod_token_id, category=category)
     losses = []
     for _ in range(config.eval_batches):
-        x, y = tensor_batch(next(iterator), device)
+        x, y, _ = tensor_batch(next(iterator), device)
         with autocast(device):
             loss = causal_lm_loss(model, x, y)
         losses.append(float(loss))
@@ -68,21 +113,32 @@ def evaluate(model, index, config, device, category=None) -> float:
     return result
 
 
-def validation_report(model, index, config, device, step, max_categories=None, fixed=None):
+def validation_report(model, index, config, device, step, max_categories=None, fixed=None,
+                      document_attention=False):
     if fixed is not None:
-        sums, counts = {}, {}
+        rank, size = world()
+        sources = sorted(fixed.source_tokens)
+        totals = torch.zeros(len(sources), 2, dtype=torch.float64, device=device)
         model.eval()
         try:
             with torch.no_grad():
-                for source, batch in fixed:
-                    x, y = tensor_batch(batch, device)
+                # Samples are sharded round-robin; per-source sums are reduced,
+                # so the result equals a single-process pass over all samples.
+                for i, (source, batch) in enumerate(fixed):
+                    if i % size != rank:
+                        continue
+                    x, y, seg = tensor_batch(batch, device, document_attention)
                     count = int((y != -100).sum())
                     with autocast(device):
-                        loss = causal_lm_loss(model, x, y)
-                    sums[source] = sums.get(source, 0.0) + float(loss)*count
-                    counts[source] = counts.get(source, 0) + count
+                        loss = causal_lm_loss(model, x, y, seg)
+                    totals[sources.index(source), 0] += float(loss)*count
+                    totals[sources.index(source), 1] += count
         finally:
             model.train()
+        if size > 1:
+            dist.all_reduce(totals)
+        sums = {s: float(totals[i, 0]) for i, s in enumerate(sources) if totals[i, 1] > 0}
+        counts = {s: int(totals[i, 1]) for i, s in enumerate(sources) if totals[i, 1] > 0}
         means = {source: sums[source]/counts[source] for source in sums}
         overall = fixed.weighted_mean(means)
         if not all(math.isfinite(v) for v in [overall, *means.values()]):
@@ -130,9 +186,9 @@ def parse_args():
 
 
 def run(args, tracker):
-    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
-        raise ValueError("this continuation trainer supports one CUDA GPU; do not launch with torchrun")
-    device = torch.device("cuda:0" if getattr(args, "device", "cuda") == "cuda" else "cpu")
+    rank, size = world()
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    device = torch.device(f"cuda:{local_rank}" if getattr(args, "device", "cuda") == "cuda" else "cpu")
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; run in the host GPU environment")
     if args.steps is not None and args.steps <= 0:
@@ -166,6 +222,14 @@ def run(args, tracker):
     if getattr(args, "init_from", None) and not new_corpus:
         raise ValueError("--init-from requires a pretraining configuration")
     block_mode = new_corpus and pretraining["sampling"] == "shuffled_blocks"
+    attention = (pretraining or {}).get("attention", "causal")
+    if attention not in ATTENTION_MODES:
+        raise ValueError(f"pretraining.attention must be one of {ATTENTION_MODES}")
+    document_attention = attention == "document"
+    if document_attention and not block_mode:
+        raise ValueError("document attention requires shuffled_blocks sampling (document ids)")
+    if size > 1 and not block_mode:
+        raise ValueError("multi-GPU training requires shuffled_blocks sampling")
     if migrating and (not block_mode or args.resume or getattr(args, "init_from", None)):
         raise ValueError("--migrate-from requires a new shuffled-block pretraining run")
     spec = SampleSpec(config.seq_len, tuple((pretraining or {}).get("prediction_offsets", [1])),
@@ -175,13 +239,15 @@ def run(args, tracker):
     target_tokens = int((pretraining if new_corpus else continuation)["target_tokens"])
     if target_tokens <= 0:
         raise ValueError("target_tokens must be positive")
-    step_tokens = config.seq_len * config.batch_size * config.grad_accum_steps
+    step_tokens = config.seq_len * config.batch_size * config.grad_accum_steps * size
     checkpoint = (latest_checkpoint(args.run_dir) if args.resume == "latest" else Path(args.resume)) if args.resume else None
     if checkpoint is None and ((args.run_dir / "checkpoints").exists() or (args.run_dir / "resolved_config.json").exists()):
         raise ValueError("run directory already contains a run; use --resume latest or a new directory")
     if migrating:
         checkpoint = Path(args.migrate_from)
     source_meta = json.loads((checkpoint / "train_state.json").read_text()) if checkpoint else None
+    if source_meta and not migrating and source_meta.get("distributed", {}).get("world_size", 1) != size:
+        raise ValueError("resume changed world_size; the global batch and sampler would change")
     if source_meta:
         for name in ("seq_len", "batch_size", "grad_accum_steps", "eod_token_id", "beta1", "beta2", "adam_eps", "weight_decay", "grad_clip"):
             if source_meta["training"][name] != getattr(config, name):
@@ -195,6 +261,8 @@ def run(args, tracker):
                                vocab_size=model_config.vocab_size,
                                tokenizer_sha256=data_policy.get("tokenizer_sha256"),
                                date_policy=data_policy.get("date_policy", "strict_upper"))
+    # All ranks have validated the run directory; only now may rank 0 write.
+    barrier()
     torch.manual_seed(config.seed)
     model = JishuiForCausalLM(model_config).to(device)
     if checkpoint is None:
@@ -203,8 +271,8 @@ def run(args, tracker):
         betas=(config.beta1, config.beta2), eps=config.adam_eps, weight_decay=config.weight_decay, fused=device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", init_scale=config.loss_scale, enabled=device.type == "cuda")
     gpu_name = torch.cuda.get_device_name() if device.type == "cuda" else "cpu"
-    LOG.info("device=%s torch=%s parameters=%d", gpu_name, torch.__version__,
-             sum(p.numel() for p in model.parameters()))
+    LOG.info("device=%s torch=%s parameters=%d world_size=%d attention=%s", gpu_name, torch.__version__,
+             sum(p.numel() for p in model.parameters()), size, attention)
     native = checkpoint is not None and (checkpoint / "training.pt").exists()
     if new_corpus and checkpoint and not native:
         raise ValueError("new-corpus resume requires its own PyTorch checkpoint")
@@ -227,8 +295,16 @@ def run(args, tracker):
     if target_tokens <= tokens_seen:
         raise ValueError("checkpoint already reached the target token budget")
     config = replace(config, max_steps=final_step, compile_step=False)
-    index, rebuilt = load_or_build_index(args.data_dir, args.index_cache or args.run_dir / "pretrain_index.npz",
-                                        category_mode=data_policy.get("category_mode", "legacy"))
+    index_path = args.index_cache or args.run_dir / "pretrain_index.npz"
+    if rank == 0:
+        index, rebuilt = load_or_build_index(args.data_dir, index_path,
+                                            category_mode=data_policy.get("category_mode", "legacy"))
+    barrier()
+    if rank != 0:
+        index, rebuilt = load_or_build_index(args.data_dir, index_path,
+                                            category_mode=data_policy.get("category_mode", "legacy"))
+        if rebuilt:
+            raise RuntimeError("non-zero rank rebuilt the index; rank 0 cache is inconsistent")
     LOG.info("index=%s rebuilt=%s usable_train_tokens=%s", args.index_cache, rebuilt, index.token_totals("train"))
     if new_corpus:
         schedule = make_pretraining_schedule(config, final_step)
@@ -278,7 +354,9 @@ def run(args, tracker):
         schedule = make_continuation_schedule(continuation, config, step, final_step,
                                               state["imported_learning_rate"])
     if block_mode:
-        sampler = ShuffledBlockIterator(index, spec, config.batch_size, config.seed, args.run_dir / "sample_indices")
+        # Every rank draws the global micro-batch; only rank 0 writes the cache.
+        sampler = ShuffledBlockIterator(index, spec, config.batch_size*size, config.seed,
+                                        args.run_dir / "sample_indices" if rank == 0 else None)
     elif sampling.get("mode") == "document_stream":
         sampler = ShuffledDocumentIterator(index, config.seq_len, config.batch_size, config.seed, config.eod_token_id)
     else:
@@ -303,21 +381,25 @@ def run(args, tracker):
                                 validation.get("seed", config.seed))
         if native and not migrating and state.get("evaluation") != fixed.metadata:
             raise ValueError("resume changed validation sample protocol")
-        (args.run_dir / "validation_protocol.json").write_text(json.dumps(fixed.metadata, indent=2))
+        if rank == 0:
+            (args.run_dir / "validation_protocol.json").write_text(json.dumps(fixed.metadata, indent=2))
         LOG.info("validation protocol=%s sources=%s missing_training_sources=%s", fixed.metadata["fingerprint"],
                  list(fixed.metadata["sources"]), fixed.metadata["missing_training_sources"])
     LOG.info("resumed=%s step=%d tokens=%d final_step=%d target_tokens=%d sampling=%s schedule=%s",
              checkpoint, step, tokens_seen, final_step, target_tokens, sampling.get("target_mix", sampling), schedule)
     resolved = {"model": model_config.to_dict(), "training": config.to_dict(),
                 "continuation": continuation, "sampling": sampling, "schedule": schedule,
-                "origin": state.get("origin"), "index_metadata": index.metadata}
+                "origin": state.get("origin"), "index_metadata": index.metadata,
+                "distributed": {"world_size": size, "global_micro_batch": config.batch_size*size,
+                                "tokens_per_update": step_tokens}}
     if new_corpus:
         resolved.update(pretraining=pretraining, data_policy=data_policy)
     if fixed:
         resolved["evaluation"] = fixed.metadata
     if state.get("data_migration"):
         resolved["data_migration"] = state["data_migration"]
-    (args.run_dir / "resolved_config.json").write_text(json.dumps(resolved, ensure_ascii=False, indent=2))
+    if rank == 0:
+        (args.run_dir / "resolved_config.json").write_text(json.dumps(resolved, ensure_ascii=False, indent=2))
     tracker.start(dict(resolved, runtime={"torch": str(torch.__version__),
         "cuda": torch.version.cuda, "gpu": gpu_name,
         "parameters": sum(p.numel() for p in model.parameters())}), step, tokens_seen,
@@ -325,8 +407,9 @@ def run(args, tracker):
     if args.evaluate_first or args.validate_only or args.expected_val_loss is not None:
         report = validation_report(model, index, config, device, step,
                                    max_categories=pretraining.get("eval_categories", 12) if new_corpus else None,
-                                   fixed=fixed)
-        (args.run_dir / "initial_validation.json").write_text(json.dumps(report, indent=2))
+                                   fixed=fixed, document_attention=document_attention)
+        if rank == 0:
+            (args.run_dir / "initial_validation.json").write_text(json.dumps(report, indent=2))
         tracker.validation(report, tokens_seen)
         if args.expected_val_loss is not None and abs(report["loss"] - args.expected_val_loss) > args.val_tolerance:
             raise RuntimeError(f"checkpoint validation mismatch: {report['loss']} vs {args.expected_val_loss}")
@@ -345,17 +428,29 @@ def run(args, tracker):
     window = dict(state.get("log_window", {"loss_sum": 0.0, "tokens": 0, "steps": 0}))
 
     def save():
-        snapshot = dict(resolved, step=step, tokens_seen=tokens_seen, sampler=sampler.state_dict(),
-                        tracking=tracker.identity, log_window=dict(window))
-        saved = save_checkpoint(args.run_dir, snapshot, model, optimizer, scaler, config.max_checkpoints)
-        LOG.info("saved checkpoint %s", saved)
-        tracker.checkpoint(saved, step, tokens_seen)
+        if rank == 0:
+            snapshot = dict(resolved, step=step, tokens_seen=tokens_seen, sampler=sampler.state_dict(),
+                            tracking=tracker.identity, log_window=dict(window))
+            saved = save_checkpoint(args.run_dir, snapshot, model, optimizer, scaler, config.max_checkpoints)
+            LOG.info("saved checkpoint %s", saved)
+            tracker.checkpoint(saved, step, tokens_seen)
+        barrier()
+
+    def any_rank(flag):
+        if size == 1:
+            return flag
+        value = torch.tensor([int(flag)], device=device)
+        dist.all_reduce(value, op=dist.ReduceOp.MAX)
+        return bool(value.item())
 
     # A new run must be independently resumable even before its first periodic
     # save. This also makes the migrated source an explicit, complete checkpoint.
     if not (args.run_dir / "checkpoints" / f"step_{step:08d}").exists():
         save()
 
+    # DDP wraps after every load so checkpoints keep the plain module's keys.
+    trainable = (DistributedDataParallel(model, device_ids=[device.index] if device.type == "cuda" else None)
+                 if size > 1 else model)
     model.train()
     start_time, start_tokens = time.monotonic(), tokens_seen
     while step < limit and tokens_seen < target_tokens and not stop:
@@ -365,18 +460,25 @@ def run(args, tracker):
             sampler.load_state_dict(before_sampler)
             optimizer.zero_grad(set_to_none=True)
             batches = [next(sampler) for _ in range(config.grad_accum_steps)]
+            # Global token count is known on every rank (all draw the same batch).
+            update_tokens = sum(int(batch.targets(1)[1].sum()) if isinstance(batch, TokenBatch)
+                                else config.seq_len*config.batch_size for batch in batches)
+            local = [rows(batch, rank, size) for batch in batches]
             counts = [int(batch.targets(1)[1].sum()) if isinstance(batch, TokenBatch)
-                      else config.seq_len*config.batch_size for batch in batches]
-            update_tokens = sum(counts)
+                      else config.seq_len*config.batch_size for batch in local]
             total_loss = 0.0
-            for batch, count in zip(batches, counts):
-                x, y = tensor_batch(batch, device)
-                with autocast(device):
-                    loss = causal_lm_loss(model, x, y)
-                if not torch.isfinite(loss):
-                    raise FloatingPointError(f"non-finite loss before update {step + 1}")
-                total_loss += float(loss.detach()) * count
-                scaler.scale(loss * (count / update_tokens)).backward()
+            for i, (batch, count) in enumerate(zip(local, counts)):
+                x, y, seg = tensor_batch(batch, device, document_attention)
+                sync = nullcontext() if size == 1 or i == len(local)-1 else trainable.no_sync()
+                with sync:
+                    with autocast(device):
+                        loss = causal_lm_loss(trainable, x, y, seg)
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError(f"non-finite loss before update {step + 1}")
+                    total_loss += float(loss.detach()) * count
+                    # DDP averages gradients over ranks; multiplying by size makes
+                    # the result the token-weighted mean over the global batch.
+                    scaler.scale(loss * (count * size / update_tokens)).backward()
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             lr = continuation_lr(schedule, step)
@@ -395,6 +497,10 @@ def run(args, tracker):
             break
         else:
             raise FloatingPointError("gradient overflow persisted after 8 retries")
+        if size > 1:
+            reduced = torch.tensor([total_loss], dtype=torch.float64, device=device)
+            dist.all_reduce(reduced)
+            total_loss = float(reduced.item())
         step += 1
         tokens_seen += update_tokens
         window["loss_sum"] += total_loss
@@ -423,42 +529,68 @@ def run(args, tracker):
             window = {"loss_sum": 0.0, "tokens": 0, "steps": 0}
         if config.eval_interval > 0 and step % config.eval_interval == 0:
             tracker.validation(validation_report(model, index, config, device, step,
-                max_categories=pretraining.get("eval_categories", 12) if new_corpus else None, fixed=fixed), tokens_seen)
+                max_categories=pretraining.get("eval_categories", 12) if new_corpus else None, fixed=fixed,
+                document_attention=document_attention), tokens_seen)
         if config.save_interval > 0 and step % config.save_interval == 0:
             save()
             last_saved = step
+        # A signal may reach ranks at different updates; stop together.
+        stop = any_rank(stop)
     if step != last_saved:
         save()
     LOG.info("%s step=%d tokens=%d", "target reached" if tokens_seen >= target_tokens else "stopped", step, tokens_seen)
     return "completed" if tokens_seen >= target_tokens else "stopped"
 
 
+def init_distributed(device):
+    size = int(os.environ.get("WORLD_SIZE", "1"))
+    if size > 1 and not dist.is_initialized():
+        if device == "cuda":
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        dist.init_process_group("nccl" if device == "cuda" else "gloo")
+    return world()
+
+
 def main():
     args = parse_args()
-    args.run_dir.mkdir(parents=True, exist_ok=True)
-    with (args.run_dir / "trainer.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError("another trainer is already using this run directory") from None
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-            handlers=[logging.StreamHandler(), logging.FileHandler(args.run_dir / "trainlog.txt")], force=True)
-        (args.run_dir / "trainer.pid").write_text(str(os.getpid()))
-        tracker = ExperimentTracker(args.run_dir, json.loads(args.config.read_text()).get("tracking"),
-                                    mode=args.wandb_mode)
-        status, exit_code = "failed", 1
-        try:
-            status = run(args, tracker)
-            exit_code = 0
-        except Exception:
-            LOG.exception("training failed; resume from the latest complete checkpoint")
-            raise
-        finally:
-            (args.run_dir / "trainer.pid").unlink(missing_ok=True)
+    rank, size = init_distributed(args.device)
+    try:
+        if rank == 0:
+            args.run_dir.mkdir(parents=True, exist_ok=True)
+        barrier()
+        with (args.run_dir / "trainer.lock" if rank == 0 else Path(os.devnull)).open("a") as lock:
+            if rank == 0:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise RuntimeError("another trainer is already using this run directory") from None
+            handlers = ([logging.StreamHandler(), logging.FileHandler(args.run_dir / "trainlog.txt")]
+                        if rank == 0 else [logging.StreamHandler()])
+            logging.basicConfig(level=logging.INFO if rank == 0 else logging.WARNING,
+                                format=f"%(asctime)s %(levelname)s rank{rank} %(name)s: %(message)s",
+                                handlers=handlers, force=True)
+            if rank == 0:
+                (args.run_dir / "trainer.pid").write_text(str(os.getpid()))
+            # Only rank 0 reports metrics; the others never create a W&B run.
+            tracker = ExperimentTracker(args.run_dir, json.loads(args.config.read_text()).get("tracking"),
+                                        mode=args.wandb_mode if rank == 0 else "disabled")
+            status, exit_code = "failed", 1
             try:
-                tracker.finish(status, exit_code)
+                status = run(args, tracker)
+                exit_code = 0
             except Exception:
-                LOG.exception("W&B finalization failed; local checkpoints and logs remain available")
+                LOG.exception("training failed; resume from the latest complete checkpoint")
+                raise
+            finally:
+                if rank == 0:
+                    (args.run_dir / "trainer.pid").unlink(missing_ok=True)
+                try:
+                    tracker.finish(status, exit_code)
+                except Exception:
+                    LOG.exception("W&B finalization failed; local checkpoints and logs remain available")
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

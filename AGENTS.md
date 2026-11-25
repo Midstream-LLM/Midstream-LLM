@@ -107,3 +107,7 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 - 部署 `deployments/corpus-blocks-v1-20261118/runtime`；配置 `configs/jishui-200m-corpus-date-open-v3-blocks.json`。39 项服务器 CPU 测试、20 步 CUDA 短测通过；完整保存 `step_00016503` 后启动正式恢复。真实迁移前后权重/Adam/Scaler/CPU+CUDA RNG 已逐项相等核验。
 - 用户服务 `jishui-v3-blocks-train.service`、`jishui-v3-blocks-dashboard.service` 已启用，独立看板 runId `jishui-200m-corpus-date-open-v3-blocks`。旧 v3 训练及推送已停止；旧实验不重启。训练服务使用 `KillMode=mixed`，避免停止时 W&B 子进程先退出导致保存后的指标回写报错。
 - 交接和复现见 `docs/corpus-pretraining.md`；部署目录保存 `handover.json`、`tests.log`、`sampling-audit.json`、`code-manifest.json`。
+
+## 文档内注意力隔断 + 8×V100 DDP（2026-11-25，优先于前节）
+- 32K 基座 SFT 不如 2K，疑因更新次数少（15,946 步）与跨文档注意力。新增 `pretraining.attention: "document"`（默认 causal，SFT/推理不变）与 torchrun DDP（仅 shuffled_blocks；全局同一 sampler 按行切分，checkpoint 与单进程等价）。
+- 配置 `configs/jishui-200m-v3-docmask-8xv100.json`（2K、全局 65,536 tokens/步、lr 5e-4、4.18B tokens、从零）；启动 `bash scripts/train_8xv100_docmask.sh smoke|start|resume`。细节、测试与核对项见 `docs/doc-attention-8xv100.md`。V100 上未实测，先跑 smoke。
