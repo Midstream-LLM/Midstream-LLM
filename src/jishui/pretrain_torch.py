@@ -32,6 +32,7 @@ from .config import load_run_config
 from .data import PackedBatchIterator, SequentialBatchIterator, ShuffledDocumentIterator, load_or_build_index, load_sampling_config
 from .block_data import SampleSpec, TokenBatch, ShuffledBlockIterator, FixedValidation
 from .model_torch import JishuiForCausalLM, causal_lm_loss
+from .optim_torch import build_optimizer
 from .schedules_torch import continuation_lr, make_continuation_schedule, make_pretraining_schedule
 from .tracking import ExperimentTracker
 
@@ -230,6 +231,10 @@ def run(args, tracker):
         raise ValueError("document attention requires shuffled_blocks sampling (document ids)")
     if size > 1 and not block_mode:
         raise ValueError("multi-GPU training requires shuffled_blocks sampling")
+    optimizer_settings = (pretraining or {}).get("optimizer")
+    optimizer_name = (optimizer_settings or {}).get("name", "adamw")
+    if optimizer_name != "adamw" and (not new_corpus or migrating):
+        raise ValueError("non-AdamW optimizers start a new run (fresh or --init-from), not a migration")
     if migrating and (not block_mode or args.resume or getattr(args, "init_from", None)):
         raise ValueError("--migrate-from requires a new shuffled-block pretraining run")
     spec = SampleSpec(config.seq_len, tuple((pretraining or {}).get("prediction_offsets", [1])),
@@ -248,6 +253,10 @@ def run(args, tracker):
     source_meta = json.loads((checkpoint / "train_state.json").read_text()) if checkpoint else None
     if source_meta and not migrating and source_meta.get("distributed", {}).get("world_size", 1) != size:
         raise ValueError("resume changed world_size; the global batch and sampler would change")
+    if source_meta and not migrating:
+        saved = (source_meta.get("pretraining") or {}).get("optimizer")
+        if (saved or {}).get("name", "adamw") != optimizer_name or (saved and saved != optimizer_settings):
+            raise ValueError("resume changed the optimizer; use --init-from for a new run")
     if source_meta:
         for name in ("seq_len", "batch_size", "grad_accum_steps", "eod_token_id", "beta1", "beta2", "adam_eps", "weight_decay", "grad_clip"):
             if source_meta["training"][name] != getattr(config, name):
@@ -267,12 +276,11 @@ def run(args, tracker):
     model = JishuiForCausalLM(model_config).to(device)
     if checkpoint is None:
         model.initialize_pretraining()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
-        betas=(config.beta1, config.beta2), eps=config.adam_eps, weight_decay=config.weight_decay, fused=device.type == "cuda")
+    optimizer = build_optimizer(model, config, optimizer_settings)
     scaler = torch.amp.GradScaler("cuda", init_scale=config.loss_scale, enabled=device.type == "cuda")
     gpu_name = torch.cuda.get_device_name() if device.type == "cuda" else "cpu"
-    LOG.info("device=%s torch=%s parameters=%d world_size=%d attention=%s", gpu_name, torch.__version__,
-             sum(p.numel() for p in model.parameters()), size, attention)
+    LOG.info("device=%s torch=%s parameters=%d world_size=%d attention=%s optimizer=%s", gpu_name,
+             torch.__version__, sum(p.numel() for p in model.parameters()), size, attention, optimizer_name)
     native = checkpoint is not None and (checkpoint / "training.pt").exists()
     if new_corpus and checkpoint and not native:
         raise ValueError("new-corpus resume requires its own PyTorch checkpoint")

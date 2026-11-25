@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 8×V100 DDP pretraining with document-masked attention.
+# 8×V100 DDP pretraining with document-masked attention and Muon.
 #
 #   bash scripts/train_8xv100_docmask.sh smoke      # 20 updates into a throwaway run dir
 #   bash scripts/train_8xv100_docmask.sh start      # new run from scratch
@@ -13,7 +13,7 @@ MODE="${1:-}"
 PYTHON="${PYTHON:-.venv-torch/bin/python}"
 CONFIG="${CONFIG:-configs/jishui-200m-v3-docmask-8xv100.json}"
 DATA_DIR="${DATA_DIR:-dataset/corpus-date-open-v3}"
-RUN_DIR="${RUN_DIR:-runs/jishui-200m-v3-docmask-8xv100}"
+RUN_DIR="${RUN_DIR:-runs/jishui-200m-v3-docmask-muon-8xv100}"
 NPROC="${NPROC:-8}"
 
 export PYTHONPATH=src

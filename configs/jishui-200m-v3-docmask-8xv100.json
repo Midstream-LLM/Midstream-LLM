@@ -56,7 +56,13 @@
       "mode": "source_stratified_blocks",
       "seed": 20261118
     },
-    "attention": "document"
+    "attention": "document",
+    "optimizer": {
+      "name": "muon",
+      "momentum": 0.95,
+      "nesterov": true,
+      "ns_steps": 5
+    }
   },
   "data": {
     "category_mode": "labels",
@@ -68,7 +74,7 @@
     "mode": "offline",
     "entity": "liangsidi-university-of-electronic-science-and-technolog",
     "project": "Jishui",
-    "name": "jishui-200m-v3-docmask-8xv100",
+    "name": "jishui-200m-v3-docmask-muon-8xv100",
     "tags": [
       "200m",
       "cuda",
@@ -79,7 +85,8 @@
       "cosine",
       "blocks-v1",
       "document-attention",
-      "validation-source-stratified-v1"
+      "validation-source-stratified-v1",
+      "muon"
     ]
   }
 }
