@@ -26,6 +26,25 @@ class DashboardTests(unittest.TestCase):
    self.assertEqual(payload['startedAt'],dt.datetime.strptime(start,'%Y-%m-%d %H:%M:%S,%f').replace(tzinfo=m.TZ).isoformat())
    self.assertEqual(payload['startedAt'],m.LogFeed(root).payload()['startedAt'])
    self.assertEqual(payload['charts']['valLoss'],[{'step':0,'value':10.5}])
+ def test_run_name_and_subtitle_follow_resolved_config(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   now=dt.datetime.now(m.TZ).strftime('%Y-%m-%d %H:%M:%S,%f')[:23]
+   (root/'trainlog.txt').write_text(f'{now} INFO step=10 loss=9.2 lr=1e-6 tokens=163840 tok/s=6300\n{now} INFO step=10 mtp_loss=9.5 weight=0.30\n')
+   base={'pretraining':{'target_tokens':4000006144,'sampling':'shuffled_blocks'},'sampling':{'mode':'shuffled_blocks'},
+         'data_policy':{'date_policy':'exclude_known_late'},'training':{'batch_size':1,'grad_accum_steps':8,'seq_len':2048}}
+   (root/'resolved_config.json').write_text(json.dumps(dict(base,model={'mtp_depth':1},origin={'format':'random','seed':42})))
+   payload=m.LogFeed(root).payload()
+   self.assertEqual(payload['runName'],'200M · 年代宽筛 · 分块打乱 · MTP')
+   self.assertTrue(payload['subtitle'].endswith('从零预训练'))
+   self.assertEqual(payload['metrics']['trainLoss'],9.2)
+   self.assertEqual(len(payload['charts']['trainLoss']),1)
+   pre=dict(base['pretraining'],attention='document',optimizer={'name':'muon'})
+   (root/'resolved_config.json').write_text(json.dumps(dict(base,pretraining=pre,model={},distributed={'world_size':8},origin={'format':'weights_only'})))
+   payload=m.LogFeed(root).payload()
+   self.assertEqual(payload['runName'],'200M · 年代宽筛 · 分块打乱 · 文档隔断 · Muon · 8卡')
+   self.assertTrue(payload['subtitle'].endswith('继续预训练'))
+   self.assertEqual(payload['config']['batchSize'],64)
  def test_sampling_retains_spike_and_endpoints(self):
   points=[dict(step=i,value=999 if i==573 else 1) for i in range(2000)]
   result=m.sample(points,100)

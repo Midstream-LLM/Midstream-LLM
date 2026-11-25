@@ -123,13 +123,30 @@ class LogFeed:
         run_name = '200M · 年代宽筛' if open_dates else ('200M · 1945年前语料' if pretraining else '200M → 4B tokens')
         if self.config.get('sampling', {}).get('mode') == 'shuffled_blocks':
             run_name += ' · 分块打乱'
+        # Experiment switches from the run's own resolved config.
+        depth = self.config.get('model', {}).get('mtp_depth', 0)
+        if depth:
+            run_name += ' · MTP' + (f'×{depth}' if depth > 1 else '')
+        if (pretraining or {}).get('attention') == 'document':
+            run_name += ' · 文档隔断'
+        if ((pretraining or {}).get('optimizer') or {}).get('name') == 'muon':
+            run_name += ' · Muon'
+        world = self.config.get('distributed', {}).get('world_size', 1)
+        if world > 1:
+            run_name += f' · {world}卡'
+        # From scratch only when the run itself started from random weights.
+        origin = (self.config.get('origin') or {}).get('format')
+        if origin is None:
+            fresh = not open_dates
+        else:
+            fresh = origin == 'random' and not self.config.get('data_migration')
         dataset = '中流语料库 · 排除明确后期，保留年代未知' if open_dates else ('中流语料库 · 成书年代上界 < 1945' if pretraining else '古汉语混合语料')
         return dict(
-            title='击水 · 200M', subtitle='古汉语原生语言模型 · 继续预训练' if open_dates else '古汉语原生语言模型 · 从零预训练',
+            title='击水 · 200M', subtitle='古汉语原生语言模型 · ' + ('从零预训练' if fresh else '继续预训练'),
             runId=self.run.name, runName=run_name, runUrl=wandb.get('url') or '',
             startedAt=self.started_at.isoformat() if self.started_at else row['stamp'].isoformat(),
             status=state, timestamp=row['stamp'].isoformat(),
-            config=dict(model='击水 200M', dataset=dataset, batchSize=train['batch_size']*train['grad_accum_steps'],sequenceLength=train['seq_len']),
+            config=dict(model='击水 200M', dataset=dataset, batchSize=train['batch_size']*train['grad_accum_steps']*world,sequenceLength=train['seq_len']),
             progress=dict(step=row['step'],tokens=row['tokens'],targetTokens=target),
             metrics={**{key:row[key] for key in KEYS.values()},'valLoss':self.validation},
             charts={key:sample([dict(step=step,value=value) for step,value in sorted(history.items())]) for key,history in self.history.items()},
