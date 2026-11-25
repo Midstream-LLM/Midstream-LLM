@@ -32,9 +32,33 @@ def sample(points, limit=800):
     return result + [points[-1]]
 
 
+def load_cost(path):
+    """Per-run cost ticker ("金币跳动") settings, sent whole with every update.
+
+    Required: gpu, watts, currency (CNY), schemes [{key, label, basis,
+    ratePerHour}] with ratePerHour for the whole machine; see
+    docs/online-dashboard-integration.md. Validated here so a bad file fails
+    at startup instead of every push returning HTTP 400."""
+    cost = json.loads(Path(path).read_text(encoding='utf-8'))
+    if (not isinstance(cost, dict) or not str(cost.get('gpu', '')).strip() or cost.get('currency') != 'CNY'
+            or not isinstance(cost.get('watts'), (int, float)) or cost['watts'] < 0
+            or not isinstance(cost.get('schemes'), list) or not cost['schemes']):
+        raise ValueError('cost file needs gpu, non-negative watts, currency CNY and schemes')
+    keys = [scheme.get('key') for scheme in cost['schemes']]
+    if len(set(keys)) != len(keys) or not set(keys) <= {'rent', 'industrial', 'residential'}:
+        raise ValueError('cost scheme keys must be unique rent/industrial/residential')
+    for scheme in cost['schemes']:
+        rate = scheme.get('ratePerHour')
+        if (not scheme.get('label') or not scheme.get('basis') or not isinstance(rate, (int, float))
+                or not math.isfinite(rate) or rate < 0):
+            raise ValueError('each cost scheme needs label, basis and a non-negative ratePerHour')
+    return cost
+
+
 class LogFeed:
-    def __init__(self, run):
+    def __init__(self, run, cost=None):
         self.run = Path(run)
+        self.cost = cost
         self.config = json.loads((self.run/'resolved_config.json').read_text())
         self.offset = 0
         self.identity = None
@@ -151,6 +175,7 @@ class LogFeed:
             metrics={**{key:row[key] for key in KEYS.values()},'valLoss':self.validation},
             charts={key:sample([dict(step=step,value=value) for step,value in sorted(history.items())]) for key,history in self.history.items()},
             replaceHistory=True,
+            **({'cost': self.cost} if self.cost else {}),
         )
 
 
@@ -161,6 +186,7 @@ def main():
     parser.add_argument('--interval', type=int, default=30)
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--cost-file', type=Path, help='per-run cost ticker JSON, pushed with every update')
     args = parser.parse_args()
     token = os.environ.get('TRAINING_INGEST_TOKEN','')
     if not args.dry_run and (not args.endpoint or not token):
@@ -168,7 +194,7 @@ def main():
     if not args.dry_run and not args.endpoint.startswith('https://') and not args.endpoint.startswith('http://127.0.0.1:'):
         parser.error('Use HTTPS for remote pushes')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
-    feed = LogFeed(args.run_dir)
+    feed = LogFeed(args.run_dir, load_cost(args.cost_file) if args.cost_file else None)
     while True:
         try:
             payload = feed.payload()

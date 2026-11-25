@@ -45,6 +45,23 @@ class DashboardTests(unittest.TestCase):
    self.assertEqual(payload['runName'],'200M · 年代宽筛 · 分块打乱 · 文档隔断 · Muon · 8卡')
    self.assertTrue(payload['subtitle'].endswith('继续预训练'))
    self.assertEqual(payload['config']['batchSize'],64)
+ def test_cost_file_is_validated_and_pushed(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)
+   now=dt.datetime.now(m.TZ).strftime('%Y-%m-%d %H:%M:%S,%f')[:23]
+   (root/'trainlog.txt').write_text(f'{now} INFO step=10 loss=9.2 lr=1e-6 tokens=163840 tok/s=6300\n')
+   (root/'resolved_config.json').write_text(json.dumps({'pretraining':{'target_tokens':1},'training':{'batch_size':1,'grad_accum_steps':8,'seq_len':2048}}))
+   cost={'gpu':'RTX 3060 12G','gpuCount':1,'watts':250,'currency':'CNY','schemes':[
+     {'key':'rent','label':'云租赁口径','basis':'RTX 3060 12G 按 ¥0.65/卡时','ratePerHour':0.65},
+     {'key':'industrial','label':'工业电价口径','basis':'250W × ¥0.85/kWh','ratePerHour':0.2125}]}
+   path=root/'cost.json'; path.write_text(json.dumps(cost,ensure_ascii=False))
+   self.assertEqual(m.LogFeed(root,m.load_cost(path)).payload()['cost'],cost)
+   self.assertNotIn('cost',m.LogFeed(root).payload())
+   for bad in ({**cost,'currency':'USD'},{**cost,'schemes':[]},{**cost,'schemes':cost['schemes']*2},
+               {**cost,'schemes':[{**cost['schemes'][0],'ratePerHour':-1}]}):
+    path.write_text(json.dumps(bad))
+    with self.assertRaises(ValueError):
+     m.load_cost(path)
  def test_sampling_retains_spike_and_endpoints(self):
   points=[dict(step=i,value=999 if i==573 else 1) for i in range(2000)]
   result=m.sample(points,100)
