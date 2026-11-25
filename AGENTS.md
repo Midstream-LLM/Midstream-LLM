@@ -114,4 +114,4 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 
 ## MTP 单变量试验（3060，2026-11-25）
 - 实现 DeepSeek-V3 风格 MTP（`model.mtp_depth`、`pretraining.mtp`、`prediction_offsets [1..D+1]`；`mtp.*` 仅训练用，`checkpoints_torch.strip_mtp` 导出主模型）。验证只评主头 NTP，协议指纹与 2K blocks 基线相同。
-- **只在 3060 上试**：`configs/jishui-200m-v3-mtp1-3060.json`（与 2K blocks 基线只差 MTP：D=1、λ=0.3、4.0B tokens、从零），`bash scripts/train_3060_mtp.sh smoke|start|resume`。8×V100 那一路不开 MTP。说明见 `docs/mtp-3060.md`。
+- **只在 3060 上试，分支 `feat/mtp-3060`**（8×V100 分支不含 MTP）：`configs/jishui-200m-v3-mtp1-3060.json`（与 2K blocks 基线只差 MTP：D=1、λ=0.3、4.0B tokens、从零），`bash scripts/train_3060_mtp.sh smoke|start|resume`。8×V100 那一路不开 MTP。说明见 `docs/mtp-3060.md`。
