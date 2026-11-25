@@ -134,27 +134,6 @@ class TransformerBlock(nn.Module):
         return x + self.mlp(self.post_attention_norm(x))
 
 
-class MTPModule(nn.Module):
-    """One DeepSeek-V3 multi-token prediction depth.
-
-    h_k = Block(W [Norm(h_{k-1}); Norm(Emb(t_{i+k}))]) predicts t_{i+k+1}, using
-    the main model's embedding and output head. The chain is causal: position i
-    combines its previous-depth state with the already-known token i+k.
-    """
-
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.hidden_norm = make_norm(config)
-        self.embed_norm = make_norm(config)
-        self.proj = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
-        self.block = TransformerBlock(config)
-        self.norm = make_norm(config)
-
-    def forward(self, hidden, embedded, mask=None):
-        x = self.proj(torch.cat((self.hidden_norm(hidden), self.embed_norm(embedded)), dim=-1))
-        return self.block(x, mask)
-
-
 class JishuiForCausalLM(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -164,21 +143,10 @@ class JishuiForCausalLM(nn.Module):
         self.norm = make_norm(config)
         if not config.tie_word_embeddings:
             self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        if config.mtp_depth:
-            self.mtp = nn.ModuleList([MTPModule(config) for _ in range(config.mtp_depth)])
 
-    def head(self, x: torch.Tensor) -> torch.Tensor:
-        return (F.linear(x, self.embed_tokens.weight) if self.config.tie_word_embeddings
-                else self.lm_head(x))
-
-    def forward(self, input_ids: torch.Tensor, segment_ids: torch.Tensor | None = None,
-                mtp_inputs: list[torch.Tensor] | None = None):
+    def forward(self, input_ids: torch.Tensor, segment_ids: torch.Tensor | None = None) -> torch.Tensor:
         """segment_ids=None is plain causal attention (SFT, inference, old runs).
-        With segment ids, packed documents cannot attend to each other.
-
-        mtp_inputs[k-1] holds token i+k at position i. With it, returns
-        (main_logits, [depth-1 logits, ...]); otherwise only main logits, so
-        MTP modules never affect inference."""
+        With segment ids, packed documents cannot attend to each other."""
         if input_ids.shape[-1] > self.config.max_position_embeddings:
             raise ValueError("sequence exceeds configured context length")
         if segment_ids is not None and segment_ids.shape != input_ids.shape:
@@ -192,19 +160,9 @@ class JishuiForCausalLM(nn.Module):
         for layer in self.layers:
             x = (checkpoint(layer, x, mask, use_reentrant=False)
                  if self.training and self.config.gradient_checkpointing else layer(x, mask))
-        logits = self.head(self.norm(x))
-        if mtp_inputs is None:
-            return logits
-        if len(mtp_inputs) != self.config.mtp_depth:
-            raise ValueError("mtp_inputs must provide one future-token tensor per MTP depth")
-        extra, hidden = [], x
-        for module, future in zip(self.mtp, mtp_inputs):
-            if future.shape != input_ids.shape:
-                raise ValueError("each MTP input must match input_ids")
-            embedded = self.embed_tokens(future).to(hidden.dtype)
-            hidden = module(hidden, embedded, mask)
-            extra.append(self.head(module.norm(hidden)))
-        return logits, extra
+        x = self.norm(x)
+        return (F.linear(x, self.embed_tokens.weight) if self.config.tie_word_embeddings
+                else self.lm_head(x))
 
     def initialize_pretraining(self, std: float = 0.02) -> None:
         """Explicit initialization for new runs; loading old checkpoints is unchanged."""
@@ -214,8 +172,7 @@ class JishuiForCausalLM(nn.Module):
                 if isinstance(module, nn.Linear) and module.bias is not None:
                     nn.init.zeros_(module.bias)
         residual_std = std / math.sqrt(2 * self.config.num_hidden_layers)
-        blocks = [*self.layers, *(m.block for m in getattr(self, "mtp", []))]
-        for layer in blocks:
+        for layer in self.layers:
             nn.init.normal_(layer.attention.o_proj.weight, std=residual_std)
             nn.init.normal_(layer.mlp.down_proj.weight, std=residual_std)
 
@@ -224,17 +181,3 @@ def causal_lm_loss(model: JishuiForCausalLM, inputs: torch.Tensor, targets: torc
                    segment_ids: torch.Tensor | None = None) -> torch.Tensor:
     logits = model(inputs) if segment_ids is None else model(inputs, segment_ids)
     return F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), targets.reshape(-1))
-
-
-def mtp_lm_loss(model, inputs, targets, mtp_inputs, mtp_targets, segment_ids=None):
-    """Pieces of the DeepSeek-V3 objective L_main + weight * mean_k L_mtp_k.
-
-    Returns (main_mean, [mtp_sum_k]). The caller divides each MTP sum by that
-    depth's token count over the whole update (all micro-batches and ranks), so
-    the objective does not depend on how rows are split. main_mean is ordinary
-    NTP loss, comparable with runs trained without MTP."""
-    logits, extra = model(inputs, segment_ids, mtp_inputs)
-    main = F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), targets.reshape(-1))
-    sums = [F.cross_entropy(lg.float().reshape(-1, lg.shape[-1]), tg.reshape(-1), reduction="sum")
-            for lg, tg in zip(extra, mtp_targets)]
-    return main, sums

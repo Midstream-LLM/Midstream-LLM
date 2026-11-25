@@ -26,13 +26,8 @@ class ModelConfig:
     attention_bias: bool = False
     mlp_bias: bool = False
     gradient_checkpointing: bool = True
-    # DeepSeek-V3-style multi-token prediction modules (training only). 0 keeps
-    # the original architecture and is omitted from to_dict for old checkpoints.
-    mtp_depth: int = 0
 
     def __post_init__(self) -> None:
-        if type(self.mtp_depth) is not int or self.mtp_depth < 0:
-            raise ValueError("mtp_depth must be a nonnegative integer")
         if self.hidden_size != self.num_attention_heads * self.head_dim:
             raise ValueError(
                 "hidden_size must equal num_attention_heads * head_dim: "
@@ -55,10 +50,7 @@ class ModelConfig:
             return cls.from_dict(json.load(handle))
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        if not value["mtp_depth"]:
-            del value["mtp_depth"]
-        return value
+        return asdict(self)
 
 
 @dataclass(frozen=True)
