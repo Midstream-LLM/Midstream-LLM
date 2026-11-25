@@ -101,7 +101,7 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 
 ## 块级打乱续训（2026-11-18，优先于前节）
 - 用户批准修复长书连续采样及验证前缀偏差。新模块 `src/jishui/block_data.py` 保留完整文档 NPY，以 2K + NTP 的全局块排列训练；尾块 mask、有效 token 加权、确定性恢复均已实现。训练 loss 为日志区间平均。
-- 已预留可变长度、预测偏移、文档/段边界及 lookahead 接口；通过 256K 数据窗口和 MTP 目标 mask 测试。**模型尚未实现 MTP 或 128K attention/位置编码方案**，trainer 明确拒绝开启非 NTP 目标。
+- 已预留可变长度、预测偏移、文档/段边界及 lookahead 接口；通过 256K 数据窗口和 MTP 目标 mask 测试。**模型尚未实现 128K attention/位置编码方案**。（MTP 已于 2026-11-25 实现，见文末 MTP 一节。）
 - 固定验证从所有 7 个已有验证来源全范围分层抽 128 块（259,906 个有效 tokens），逐来源评估并按完整留出集来源 token 量加权。gutenberg、wanli、dongfang_ocr、shenbao_ocr 没有留出数据，报告明确记录，不挪用训练集。
 - 旧 v3 run 在完整 checkpoint `step_00016483` / 270,057,472 tokens 停止。新 run `runs/jishui-200m-corpus-date-open-v3-blocks` 通过 `--migrate-from` 保留权重、Adam、GradScaler、RNG、学习率和原预算，仅重排当前 epoch 未读后缀；后续使用 `--resume latest`。
 - 部署 `deployments/corpus-blocks-v1-20261118/runtime`；配置 `configs/jishui-200m-corpus-date-open-v3-blocks.json`。39 项服务器 CPU 测试、20 步 CUDA 短测通过；完整保存 `step_00016503` 后启动正式恢复。真实迁移前后权重/Adam/Scaler/CPU+CUDA RNG 已逐项相等核验。
@@ -111,3 +111,7 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 ## 文档内注意力隔断 + 8×V100 DDP（2026-11-25，优先于前节）
 - 32K 基座 SFT 不如 2K，疑因更新次数少（15,946 步）与跨文档注意力。新增 `pretraining.attention: "document"`（默认 causal，SFT/推理不变）与 torchrun DDP（仅 shuffled_blocks；全局同一 sampler 按行切分，checkpoint 与单进程等价）。
 - 配置 `configs/jishui-200m-v3-docmask-8xv100.json`（2K、全局 65,536 tokens/步、Muon+AdamW、lr 5e-4、4 epoch = 8,364,265,088 tokens / 127,629 次更新、从零；`pretraining.optimizer`，实现在 `src/jishui/optim_torch.py`）；启动 `bash scripts/train_8xv100_docmask.sh smoke|start|resume`。细节、测试与核对项见 `docs/doc-attention-8xv100.md`。V100 上未实测，先跑 smoke。
+
+## MTP 单变量试验（3060，2026-11-25）
+- 实现 DeepSeek-V3 风格 MTP（`model.mtp_depth`、`pretraining.mtp`、`prediction_offsets [1..D+1]`；`mtp.*` 仅训练用，`checkpoints_torch.strip_mtp` 导出主模型）。验证只评主头 NTP，协议指纹与 2K blocks 基线相同。
+- **只在 3060 上试**：`configs/jishui-200m-v3-mtp1-3060.json`（与 2K blocks 基线只差 MTP：D=1、λ=0.3、4.0B tokens、从零），`bash scripts/train_3060_mtp.sh smoke|start|resume`。8×V100 那一路不开 MTP。说明见 `docs/mtp-3060.md`。

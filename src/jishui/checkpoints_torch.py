@@ -13,11 +13,13 @@ from safetensors import safe_open
 from .checkpoints import prune_checkpoints
 
 
-def check_model_config(saved: dict, requested: dict) -> None:
+def check_model_config(saved: dict, requested: dict, *, ignore_mtp: bool = False) -> None:
     # Checkpointing changes memory use, not the model or parameter layout.
     saved, requested = dict(saved), dict(requested)
-    saved.pop("gradient_checkpointing", None)
-    requested.pop("gradient_checkpointing", None)
+    ignored = ("gradient_checkpointing", "mtp_depth") if ignore_mtp else ("gradient_checkpointing",)
+    for key in ignored:
+        saved.pop(key, None)
+        requested.pop(key, None)
     if saved != requested:
         raise ValueError("checkpoint architecture differs from requested model")
 
@@ -137,6 +139,18 @@ def load_model_weights(path: Path, model) -> dict:
     if bundle["format_version"] != 1:
         raise ValueError("unsupported CUDA checkpoint format")
     state = bundle["state"]
-    check_model_config(state["model"], model.config.to_dict())
-    model.load_state_dict(bundle["model"], strict=True)
+    # MTP modules are training-only: a weights-only start may drop them (MTP
+    # parent -> plain model) or keep fresh ones (plain parent -> MTP model).
+    check_model_config(state["model"], model.config.to_dict(), ignore_mtp=True)
+    weights = {k: v for k, v in bundle["model"].items()
+               if not k.startswith("mtp.") or getattr(model.config, "mtp_depth", 0)}
+    missing, unexpected = model.load_state_dict(weights, strict=False)
+    if unexpected or any(not k.startswith("mtp.") for k in missing):
+        raise ValueError(f"weights do not match model: missing={missing} unexpected={unexpected}")
     return state
+
+
+def strip_mtp(model_state: dict, model_config: dict) -> tuple[dict, dict]:
+    """Main-model weights and config for SFT/inference export (drop mtp.*)."""
+    config = {k: v for k, v in model_config.items() if k != "mtp_depth"}
+    return {k: v for k, v in model_state.items() if not k.startswith("mtp.")}, config
