@@ -12,7 +12,7 @@ Protocol (runs/evaluations/20261125-3060-sft-2k, reproduced here):
 Usage (from the repo root, one GPU):
   PYTHONPATH=src python scripts/sft/eval_sft_compare.py \\
       --config configs/sft-v1-simplified-2k-muon.json \\
-      --checkpoint runs/jishui-200m-sft-v1-simplified-2k-muon/checkpoints/step_00001434 \\
+      --checkpoint <checkpoint named in runs/jishui-200m-sft-v1-simplified-2k-muon/final.json> \\
       --out runs/evaluations/sft-2k-muon
 """
 from __future__ import annotations
@@ -183,7 +183,8 @@ def main(argv=None):
             "torch": torch.__version__, "checkpoint": str(args.checkpoint.resolve()), "step": state["step"],
             "weights_sha256": sha256_file(args.checkpoint / "training.pt"), "config_sha256": sha256_file(args.config),
             "model": cfg.to_dict(), "sft_parent": state["sft"].get("parent_checkpoint"),
-            "sft_parent_step": state["sft"].get("parent_step"), **checks}
+            "sft_parent_step": state["sft"].get("parent_step"),
+            "sft_optimizer": state["sft"]["hyperparameters"].get("optimizer", "adamw"), **checks}
     put(args.out / "info.json", info)
     print("loaded", info["checkpoint"], info["gpu"], flush=True)
 
@@ -265,7 +266,8 @@ def main(argv=None):
                "objective": objective, "baselines": BASELINES}
     put(args.out / "summary.json", summary)
     lines = ["# SFT 对比：2K Muon 基座", "",
-             f"checkpoint `{info['checkpoint']}`（step {info['step']}），GPU {info['gpu']}。", "",
+             f"checkpoint `{info['checkpoint']}`（step {info['step']}），SFT 优化器 {info['sft_optimizer']}，GPU {info['gpu']}。"
+             "两个基线都是 AdamW SFT。", "",
              "| 任务 | 计分 tokens | 本次 CE | 旧 2K SFT CE | 32K SFT CE |", "|---|---:|---:|---:|---:|"]
     for key in ["all", *OFFICIAL_TARGETS]:
         name = "全测试集" if key == "all" else TASK_NAMES[key]

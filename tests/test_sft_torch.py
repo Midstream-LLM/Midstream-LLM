@@ -100,7 +100,7 @@ def strict_config(tmp, parent, **expect):
     recipe = {"data_dir": str(tmp / "data"), "init_from": str(parent), "tokenizer": None, "epochs": 2,
               "micro_tokens": 64, "grad_accum": 2, "lr": 1e-3, "min_lr": 5e-6, "warmup_steps": 50,
               "weight_decay": 0.01, "grad_clip": 1.0, "eval_interval": 3, "save_interval": 3,
-              "keep_checkpoints": 2, "gradient_checkpointing": False, "seed": 1234}
+              "keep_checkpoints": 2, "gradient_checkpointing": False, "seed": 1234, "optimizer": "adamw"}
     path = tmp / "strict.json"
     path.write_text(json.dumps({"sft": recipe, "expect": expect}))
     return path
@@ -132,6 +132,26 @@ class StrictConfigTest(unittest.TestCase):
         d = weights(self.tmp / "d")
         for k in a:
             self.assertTrue(torch.equal(a[k], d[k]), k)
+
+    def test_muon_sft_trains_resumes_and_differs_from_adamw(self):
+        config = strict_config(self.tmp, self.parent)
+        raw = json.loads(config.read_text())
+        raw["sft"]["optimizer"] = "muon"
+        config.write_text(json.dumps(raw))
+        run = ["--config", str(config), "--device", "cpu"]
+        state = sft_torch.run(sft_torch.parse_args(run + ["--run-dir", str(self.tmp / "m")]))
+        losses = [h["val_loss"]["all"] for h in state["sft"]["history"] if "val_loss" in h]
+        self.assertLess(losses[-1], losses[0])
+        sft_torch.run(sft_torch.parse_args(run + ["--run-dir", str(self.tmp / "n"), "--max-steps", "4"]))
+        sft_torch.run(sft_torch.parse_args(run + ["--run-dir", str(self.tmp / "n"), "--resume"]))
+        m, n = weights(self.tmp / "m"), weights(self.tmp / "n")
+        for k in m:
+            self.assertTrue(torch.equal(m[k], n[k]), k)
+        sft_torch.run(args(self.tmp, self.tmp / "a", "--init-from", str(self.parent)))
+        a = weights(self.tmp / "a")
+        self.assertTrue(any(not torch.equal(a[k], m[k]) for k in a))
+        bundle = torch.load(sorted((self.tmp / "m" / "checkpoints").iterdir())[-1] / "training.pt", weights_only=True)
+        self.assertTrue(any("momentum_buffer" in v for v in bundle["optimizer"]["state"].values()))
 
     def test_cli_cannot_override_recipe(self):
         config = strict_config(self.tmp, self.parent)

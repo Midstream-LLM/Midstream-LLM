@@ -1,5 +1,5 @@
 {
-  "comment": "Strict SFT recipe: 2K Muon base (step 63784) with the exact 2026-11-24 sft_v1_simplified 2K recipe. Do not edit; any mismatch must stop the run. See docs/sft-2k-muon-compare.md.",
+  "comment": "Strict SFT recipe (main): 2K Muon base step 63784, 2026-11-24 2K recipe with Muon (+AdamW for embedding/norms) as the SFT optimizer. Do not edit; any mismatch must stop the run. See docs/sft-2k-muon-compare.md.",
   "sft": {
     "data_dir": "dataset/sft/sft_v1_simplified/compact_candidate_37_simplified",
     "init_from": "/data/jishui-docmask/runs/jishui-200m-v3-docmask-muon-8xv100/checkpoints/step_00063784",
@@ -16,7 +16,8 @@
     "save_interval": 400,
     "keep_checkpoints": 2,
     "gradient_checkpointing": false,
-    "seed": 1234
+    "seed": 1234,
+    "optimizer": "muon"
   },
   "expect": {
     "data_fingerprint": "fc098eca70b5b2889d4ec5a5a774518f6ec951bb97c2fba387b2f57d9d9662fd",
@@ -24,11 +25,6 @@
     "train_samples": 140011,
     "val_samples": 6859,
     "test_samples": 6965,
-    "total_steps": 1434,
-    "steps_per_epoch": [
-      717,
-      717
-    ],
     "parent_step": 63784,
     "parent_model": {
       "name": "Jishui-200M-Base",

@@ -28,6 +28,7 @@ from .checkpoints import latest_checkpoint
 from .checkpoints_torch import load_checkpoint, load_model_weights, save_checkpoint
 from .config import ModelConfig
 from .model_torch import JishuiForCausalLM
+from .optim_torch import MuonAdamW, muon_parameters
 
 LOG = logging.getLogger("jishui.sft_torch")
 IM_START, IM_END, PAD = 3, 4, 2
@@ -159,6 +160,24 @@ def sample_generations(model, data: CompactSFT, tokenizer, device, per_task: int
     return out
 
 
+def build_sft_optimizer(model, args, device):
+    """Weight decay on matrices only (norms and biases excluded), for both choices.
+    Muon updates are RMS-matched to AdamW, so the same lr schedule applies."""
+    if args.optimizer == "adamw":
+        decay = [p for n, p in model.named_parameters() if p.ndim >= 2]
+        no_decay = [p for n, p in model.named_parameters() if p.ndim < 2]
+        return torch.optim.AdamW([{"params": decay, "weight_decay": args.weight_decay},
+                                  {"params": no_decay, "weight_decay": 0.0}],
+                                 lr=args.lr, betas=(0.9, 0.95), eps=1e-5, fused=device.type == "cuda")
+    muon, adam = muon_parameters(model)
+    adam_decay = [p for p in adam if p.ndim >= 2]           # tied embedding / output head
+    adam_plain = [p for p in adam if p.ndim < 2]            # norms and biases
+    return MuonAdamW([{"params": muon, "use_muon": True, "weight_decay": args.weight_decay},
+                      {"params": adam_decay, "use_muon": False, "weight_decay": args.weight_decay},
+                      {"params": adam_plain, "use_muon": False, "weight_decay": 0.0}],
+                     lr=args.lr, momentum=0.95, nesterov=True, ns_steps=5, betas=(0.9, 0.95), eps=1e-5)
+
+
 def lr_at(step: int, total: int, peak: float, floor: float, warmup: int) -> float:
     if step < warmup:
         return peak * (step + 1) / warmup
@@ -204,6 +223,8 @@ def build_parser(required: bool = True):
     p.add_argument("--warmup-steps", type=int, default=50)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw",
+                   help="muon: Muon on transformer-layer matrices, AdamW on embedding/norms/biases")
     p.add_argument("--eval-interval", type=int, default=200)
     p.add_argument("--save-interval", type=int, default=400)
     p.add_argument("--keep-checkpoints", type=int, default=2)
@@ -298,11 +319,7 @@ def run(args) -> dict:
         config = ModelConfig.from_dict({**config.to_dict(), "gradient_checkpointing": True})
     torch.manual_seed(args.seed)
     model = JishuiForCausalLM(config).to(device)
-    decay = [p for n, p in model.named_parameters() if p.ndim >= 2]
-    no_decay = [p for n, p in model.named_parameters() if p.ndim < 2]
-    optimizer = torch.optim.AdamW([{"params": decay, "weight_decay": args.weight_decay},
-                                   {"params": no_decay, "weight_decay": 0.0}],
-                                  lr=args.lr, betas=(0.9, 0.95), eps=1e-5, fused=device.type == "cuda")
+    optimizer = build_sft_optimizer(model, args, device)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda", init_scale=256.0)
 
     if args.resume:
