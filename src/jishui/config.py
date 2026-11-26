@@ -25,20 +25,31 @@ class ModelConfig:
     tie_word_embeddings: bool = True
     attention_bias: bool = False
     mlp_bias: bool = False
+    qk_norm: bool = False
+    attn_output_gate: bool = False
     gradient_checkpointing: bool = True
 
     def __post_init__(self) -> None:
-        if self.hidden_size != self.num_attention_heads * self.head_dim:
-            raise ValueError(
-                "hidden_size must equal num_attention_heads * head_dim: "
-                f"{self.hidden_size} != {self.num_attention_heads} * {self.head_dim}"
-            )
+        if min(
+            self.vocab_size,
+            self.hidden_size,
+            self.num_hidden_layers,
+            self.num_attention_heads,
+            self.num_key_value_heads,
+            self.head_dim,
+            self.intermediate_size,
+        ) < 1:
+            raise ValueError("model dimensions and head counts must be positive")
         if self.num_attention_heads % self.num_key_value_heads != 0:
             raise ValueError("num_attention_heads must be divisible by num_key_value_heads")
         if self.head_dim % 2:
             raise ValueError("head_dim must be even for RoPE")
         if self.norm_type not in {"layernorm", "rmsnorm"}:
             raise ValueError("norm_type must be layernorm or rmsnorm")
+        if not math.isfinite(self.norm_eps) or self.norm_eps <= 0:
+            raise ValueError("norm_eps must be finite and positive")
+        if not isinstance(self.qk_norm, bool) or not isinstance(self.attn_output_gate, bool):
+            raise ValueError("qk_norm and attn_output_gate must be booleans")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ModelConfig":

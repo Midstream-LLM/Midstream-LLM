@@ -8,14 +8,24 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from safetensors import safe_open
 
 from .checkpoints import prune_checkpoints
 
 
+OPTIONAL_MODEL_DEFAULTS = {
+    "qk_norm": False,
+    "attn_output_gate": False,
+}
+
+
 def check_model_config(saved: dict, requested: dict) -> None:
     # Checkpointing changes memory use, not the model or parameter layout.
+    # Backfill optional architecture flags added after 200M so older checkpoints
+    # remain directly loadable when those features are disabled.
     saved, requested = dict(saved), dict(requested)
+    for key, default in OPTIONAL_MODEL_DEFAULTS.items():
+        saved.setdefault(key, default)
+        requested.setdefault(key, default)
     saved.pop("gradient_checkpointing", None)
     requested.pop("gradient_checkpointing", None)
     if saved != requested:
@@ -23,6 +33,8 @@ def check_model_config(saved: dict, requested: dict) -> None:
 
 
 def import_mlx(path: Path, model, optimizer) -> dict:
+    from safetensors import safe_open
+
     state = json.loads((path / "train_state.json").read_text())
     check_model_config(state["model"], model.config.to_dict())
     parameters = dict(model.named_parameters())

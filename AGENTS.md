@@ -115,3 +115,8 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 ## 2K Muon 基座 SFT 对比（2026-11-26）
 - 2K Muon 主训练已完成（step 63,784，固定验证 2.987）；32K 扩展因 RoPE θ 未调整而失败，暂不使用。
 - 在**二号机**上对 2K Muon 基座做 Muon SFT（父权重从一号机拷到二号机仓库 `runs/parents/jishui-200m-v3-docmask-muon-8xv100/step_00063784`，两边 sha256 一致；超参按 Muon 调：lr 1e-4→1e-5、wd 0.1，2 epoch；不再严格复现 11-24 AdamW 配方）：严格配置 `configs/sft-v1-simplified-2k-muon.json`（`sft_torch --config`，配方不可被命令行覆盖，`expect` 不符即停），启动 `bash scripts/sft/run_sft_2k_muon.sh check|smoke|start|resume|eval`（训练默认 8 卡 torchrun DDP，`sft_torch` 每次更新的 batch 与单卡相同，开训后不可换卡数），评测 `scripts/sft/eval_sft_compare.py`。执行规则与回传清单见 `docs/sft-2k-muon-compare.md`。
+
+## Stage 1 架构落地：Jishui-600M-Base（M2 满血 Gated 版，2026-11-26）
+- 模型架构在 `feat/doc-attention-8xv100` 升级落地：保持 30 层深度，`hidden_size=1280`，解耦宽头 4:1 GQA（`16Q / 4KV, head_dim=128, q_dim=2048`），SwiGLU `intermediate_size=3328`（不裁减 FFN），`RMSNorm(eps=1e-6)`（显式 fp32 均方根累加防 V100 fp16 溢出），开启 `qk_norm=true` 与独立 `attn_output_gate=true`（SDPA 输出后接独立 `gate_proj` + `Sigmoid`，绝不与 `q_proj` 拼接，由 Muon 独立正交化），`rope_theta=1_000_000` 预留 32K 扩窗。精确总参 **700,665,600**（700.67M，非嵌 658.72M）。
+- 旧 200M checkpoint 完全向后兼容（`checkpoints_torch.check_model_config` 对旧快照默认补齐 `qk_norm=False, attn_output_gate=False`）。
+- 8×V100 4-epoch 预训练配置：`configs/jishui-600m-v3-docmask-8xv100.json`（2K、65,536 tok/step、Muon lr 4e-4→4e-5、warmup 1500、`gradient_checkpointing=true`）；可用 `CONFIG=configs/jishui-600m-v3-docmask-8xv100.json RUN_DIR=runs/jishui-600m-v3-docmask-muon-8xv100 bash scripts/train_8xv100_docmask.sh smoke|start|resume` 启动。

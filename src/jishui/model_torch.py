@@ -11,9 +11,27 @@ from torch.utils.checkpoint import checkpoint
 from .config import ModelConfig
 
 
+class RMSNorm(nn.Module):
+    """RMSNorm with explicit fp32 variance accumulation for V100 fp16 AMP safety."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_fp32 = x.float()
+        if hasattr(F, "rms_norm"):
+            out = F.rms_norm(x_fp32, (self.weight.shape[0],), self.weight.float(), self.eps)
+        else:
+            rms = torch.rsqrt(x_fp32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+            out = x_fp32 * rms * self.weight.float()
+        return out.to(x.dtype)
+
+
 def make_norm(config: ModelConfig) -> nn.Module:
     if config.norm_type == "rmsnorm":
-        return nn.RMSNorm(config.hidden_size, eps=config.norm_eps)
+        return RMSNorm(config.hidden_size, eps=config.norm_eps)
     return nn.LayerNorm(config.hidden_size, eps=config.norm_eps, bias=config.norm_bias)
 
 
@@ -89,25 +107,39 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.q_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
+        q_size = config.num_attention_heads * config.head_dim
         kv_size = config.num_key_value_heads * config.head_dim
+        self.q_proj = nn.Linear(config.hidden_size, q_size, bias=config.attention_bias)
         self.k_proj = nn.Linear(config.hidden_size, kv_size, bias=config.attention_bias)
         self.v_proj = nn.Linear(config.hidden_size, kv_size, bias=config.attention_bias)
-        self.o_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
+        if config.attn_output_gate:
+            # Separate 2D parameter (never fused into q_proj) so Muon orthogonalizes
+            # Q and Gate matrices independently without cross-contaminating scales.
+            self.gate_proj = nn.Linear(config.hidden_size, q_size, bias=config.attention_bias)
+        if config.qk_norm:
+            self.q_norm = RMSNorm(config.head_dim, eps=config.norm_eps)
+            self.k_norm = RMSNorm(config.head_dim, eps=config.norm_eps)
+        self.o_proj = nn.Linear(q_size, config.hidden_size, bias=config.attention_bias)
 
     def forward(self, x: torch.Tensor, mask: DocumentMask | None = None) -> torch.Tensor:
         c = self.config
         batch, length, _ = x.shape
+        q_size = c.num_attention_heads * c.head_dim
         q = self.q_proj(x).view(batch, length, c.num_attention_heads, c.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(batch, length, c.num_key_value_heads, c.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(batch, length, c.num_key_value_heads, c.head_dim).transpose(1, 2)
+        if c.qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)
         q, k = rope(q, c.rope_theta), rope(k, c.rope_theta)
         if c.num_attention_heads != c.num_key_value_heads:
             repeats = c.num_attention_heads // c.num_key_value_heads
             k, v = k.repeat_interleave(repeats, dim=1), v.repeat_interleave(repeats, dim=1)
         y = (F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0) if mask is None
              else mask.attend(q, k, v))
-        return self.o_proj(y.transpose(1, 2).reshape(batch, length, c.hidden_size))
+        y = y.transpose(1, 2).reshape(batch, length, q_size)
+        if c.attn_output_gate:
+            y = y * torch.sigmoid(self.gate_proj(x))
+        return self.o_proj(y)
 
 
 class SwiGLU(nn.Module):

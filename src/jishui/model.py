@@ -26,6 +26,8 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
+        self.qk_norm = config.qk_norm
+        self.attn_output_gate = config.attn_output_gate
         self.scale = config.head_dim**-0.5
         self.q_proj = nn.Linear(
             config.hidden_size,
@@ -42,6 +44,15 @@ class CausalSelfAttention(nn.Module):
             self.num_kv_heads * self.head_dim,
             bias=config.attention_bias,
         )
+        if self.attn_output_gate:
+            self.gate_proj = nn.Linear(
+                config.hidden_size,
+                self.num_heads * self.head_dim,
+                bias=config.attention_bias,
+            )
+        if self.qk_norm:
+            self.q_norm = nn.RMSNorm(self.head_dim, eps=config.norm_eps)
+            self.k_norm = nn.RMSNorm(self.head_dim, eps=config.norm_eps)
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim,
             config.hidden_size,
@@ -57,6 +68,9 @@ class CausalSelfAttention(nn.Module):
         q = q.transpose(0, 2, 1, 3)
         k = k.transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
         q = self.rope(q)
         k = self.rope(k)
 
@@ -73,6 +87,8 @@ class CausalSelfAttention(nn.Module):
             mask="causal",
         )
         y = y.transpose(0, 2, 1, 3).reshape(batch, length, -1)
+        if self.attn_output_gate:
+            y = y * mx.sigmoid(self.gate_proj(x))
         return self.o_proj(y)
 
 

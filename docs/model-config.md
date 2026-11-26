@@ -1,6 +1,6 @@
 # 模型配置说明（对齐 Qwen3-1.7B 尺度）
 
-状态：设计稿，未落地。实现时以本文档数值为准，数值变动需同步更新本文档与 AGENTS.md。
+状态（2026-11-26 更新）：Stage 0（200M）与 Stage 1（`Jishui-600M-Base`，M2 满血 Gated 版，精确 700.67M 参数）均已在 `src/jishui/` 与 `configs/` 落地；Stage 2（1.5B）仍为设计稿。实现时以本文档数值为准，数值变动需同步更新本文档与 AGENTS.md。
 
 ## 1. 参考：Qwen3-1.7B 配置
 
@@ -69,27 +69,38 @@ final_norm: true
 
 注意：本配置为试验取向，与 Stage 1/2 的 Qwen3 家族有偏差（LayerNorm+bias、head_dim 64、rope_theta 1e4、seq 2048）——Stage 0 用于快速试验，**不承诺与 600M/1.5B 结构完全同族**；Stage 1/2 以 Qwen3 结构为准。
 
-### Stage 1：~600M（首选）
+### Stage 1：Jishui-600M-Base（M2 满血 Gated 版，已落地）
+
+延续 200M 已验证的 **30 层深度** 与 ~2.6× SwiGLU 比例，结合 Qwen3 / Qwen3.5 的宽头解耦 GQA（`q_dim = 2048 > d = 1280`）、`RMSNorm`（fp32 方差累加）、`QK-Norm` 与独立 `SDPA Output Sigmoid Gate`（不裁减 FFN，总参 700.67M），配置见 `configs/jishui-600m-v3-docmask-8xv100.json`：
 
 | 参数 | 值 |
 |---|---|
-| hidden_size | 1536 |
-| num_hidden_layers | 16 |
-| num_attention_heads | 12 |
-| num_key_value_heads | 6 |
-| head_dim | 128 |
-| intermediate_size | 6144 |
-| rms_norm_eps | 1e-6 |
-| rope_theta | 1_000_000 |
-| max_position_embeddings | 4096 |
-| tie_word_embeddings | true |
+| name | `Jishui-600M-Base` |
 | vocab_size | 32768 |
+| hidden_size | 1280 |
+| num_hidden_layers | 30 |
+| num_attention_heads | 16（`q_dim = 16 × 128 = 2048`） |
+| num_key_value_heads | 4（4:1 GQA） |
+| head_dim | 128 |
+| intermediate_size | 3328（`2.60 × d`，13×256） |
+| norm_type / norm_eps | `rmsnorm` / `1e-6`（fp32 方差计算） |
+| qk_norm | `true`（逐 head `RMSNorm(128)`，位于 RoPE 前） |
+| attn_output_gate | `true`（SDPA 输出后接独立 `Linear(1280→2048)` + `Sigmoid`） |
+| rope_theta | `1_000_000` |
+| max_position_embeddings | 2048（主训练 2K，预留 32K 扩窗） |
+| tie_word_embeddings | `true` |
+| attention_bias / mlp_bias | `false` |
 
-核算：
-- embedding：32768 × 1536 ≈ 50.3M
-- 每层：15.5 × 1536² ≈ 36.6M（细算 attn 7.08M + mlp 28.31M = 35.39M）
-- 16 层 ≈ 566M
-- **合计 ≈ 617M**
+核算（精确）：
+- embedding：`32768 × 1280 = 41,943,040`（41.94M）
+- 每层：
+  - attn 主干：`q (1280×2048) + k (1280×512) + v (1280×512) + o (2048×1280) = 6,553,600`（6.55M）
+  - attn 输出门控：独立 `gate_proj (1280×2048) = 2,621,440`（2.62M，不与 `q_proj` 拼接，Muon 独立正交化）
+  - mlp（SwiGLU）：`3 × 1280 × 3328 = 12,779,520`（12.78M）
+  - norms：`2 × 1280 + 2 × 128 = 2,816`
+  - 单层合计：`21,957,376`（21.96M）
+- 30 层 + 末层 RMSNorm：`658,722,560`（658.72M）
+- **总参数量 = `700,665,600`（700.67M）**；32K fp16 KV Cache 仅 **1.88 GiB**（小于 200M MHA 的 2.58 GiB）。
 
 ### Stage 2：~1.5B
 
