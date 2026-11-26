@@ -114,4 +114,4 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 
 ## 2K Muon 基座 SFT 对比（2026-11-26）
 - 2K Muon 主训练已完成（step 63,784，固定验证 2.987）；32K 扩展因 RoPE θ 未调整而失败，暂不使用。
-- 对 2K Muon 基座做 Muon SFT（超参按 Muon 调：lr 1e-4→1e-5、wd 0.1，2 epoch；不再严格复现 11-24 AdamW 配方）：严格配置 `configs/sft-v1-simplified-2k-muon.json`（`sft_torch --config`，配方不可被命令行覆盖，`expect` 不符即停），启动 `bash scripts/sft/run_sft_2k_muon.sh check|smoke|start|resume|eval`，评测 `scripts/sft/eval_sft_compare.py`。执行规则与回传清单见 `docs/sft-2k-muon-compare.md`。
+- 在**二号机**上对 2K Muon 基座做 Muon SFT（父权重从一号机拷到二号机仓库 `runs/parents/jishui-200m-v3-docmask-muon-8xv100/step_00063784`，两边 sha256 一致；超参按 Muon 调：lr 1e-4→1e-5、wd 0.1，2 epoch；不再严格复现 11-24 AdamW 配方）：严格配置 `configs/sft-v1-simplified-2k-muon.json`（`sft_torch --config`，配方不可被命令行覆盖，`expect` 不符即停），启动 `bash scripts/sft/run_sft_2k_muon.sh check|smoke|start|resume|eval`，评测 `scripts/sft/eval_sft_compare.py`。执行规则与回传清单见 `docs/sft-2k-muon-compare.md`。

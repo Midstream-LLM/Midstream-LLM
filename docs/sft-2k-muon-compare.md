@@ -1,4 +1,4 @@
-# 2K Muon 基座的 Muon SFT（2026-11-26）——严格按配置执行
+# 2K Muon 基座的 Muon SFT（2026-11-26，二号机）——严格按配置执行
 
 目的：用 2K Muon 基座的最终权重（step 63,784，固定验证 loss 2.987）做一次 SFT，优化器用 Muon，超参按 Muon 调整。然后用 11 月 25 日的同一套评测，和两个已有 SFT 作参考对比：
 
@@ -13,15 +13,26 @@
 
 1. 所有影响结果的参数都写在 `configs/sft-v1-simplified-2k-muon.json` 里，**不要改动这个文件**。命令行也不能覆盖其中的配方参数，`sft_torch` 会直接报错。只允许用 `PYTHON`、`GPU` 两个环境变量指定解释器和使用哪张卡。
 2. 配置中的 `expect` 一节会在训练前逐项核对：数据指纹、分词器 sha256、train/val/test 条数、父 checkpoint 的 step 和模型结构。**任何一项不符就停下来报告，不要为了让它通过而改配置或改数据。**
-3. 单卡训练（默认 `GPU=0`）。不要用 torchrun。
+3. 在二号机上单卡训练（默认 `GPU=0`；如果 0 号卡被占用，用 `GPU=<空闲卡号>`）。不要用 torchrun。
 4. 评测脚本的输出中只要出现 `STOP:` 就必须停下来报告，不要绕过。
 5. 训练中如果 loss 出现 NaN，或 val loss 连续两次评测上升超过 0.3，先停下来报告，不要自行改学习率重跑。
 
-## 前置条件（在一号机仓库根目录）
+## 前置条件（**在二号机**仓库根目录执行）
 
-- 代码：`git fetch origin && git checkout feat/doc-attention-8xv100 && git pull`。
-- 父权重：`/data/jishui-docmask/runs/jishui-200m-v3-docmask-muon-8xv100/checkpoints/step_00063784/`，需要包含 `training.pt` 和 `train_state.json`。
-- SFT 数据：`dataset/sft/sft_v1_simplified/compact_candidate_37_simplified/`，与 11-24 两次 SFT 用的是同一份。如果本机没有，从 corpus 服务器原样拷贝这个目录，不要重新导出。用 `check` 核对指纹，应为 `fc098eca…9662fd`。
+训练在**二号机**上做，一号机上的 2K 预训练 run 不动。
+
+- 代码：二号机上的仓库执行 `git fetch origin && git checkout feat/doc-attention-8xv100 && git pull`。
+- 父权重：从一号机原样拷贝整个 checkpoint 目录，放到二号机仓库内配置指定的位置。只读拷贝，不要移动或删除一号机上的原件：
+  ```bash
+  # 一号机上的源目录（含 training.pt、train_state.json）
+  #   /data/jishui-docmask/runs/jishui-200m-v3-docmask-muon-8xv100/checkpoints/step_00063784/
+  # 二号机上的目标目录（相对仓库根目录，配置 init_from 指向这里）
+  mkdir -p runs/parents/jishui-200m-v3-docmask-muon-8xv100
+  rsync -a <一号机>:/data/jishui-docmask/runs/jishui-200m-v3-docmask-muon-8xv100/checkpoints/step_00063784 \
+        runs/parents/jishui-200m-v3-docmask-muon-8xv100/
+  ```
+  拷完后在两台机器上分别执行 `sha256sum training.pt train_state.json`，**两边必须完全一致**，并把这两个 sha256 写进回传报告。不一致就停下来报告。
+- SFT 数据：`dataset/sft/sft_v1_simplified/compact_candidate_37_simplified/`，与 11-24 两次 SFT 用的是同一份。11-24 的 32K SFT 就是在二号机上训的，数据应该已经在那里。如果不在，从 corpus 服务器原样拷贝这个目录，不要重新导出。用 `check` 核对指纹，应为 `fc098eca…9662fd`。
 - 分词器：仓库内 `tokenizer/ccc-bbpe-32k/tokenizer.json`，sha256 为 `7cac6a27…0e26`。
 - Python 环境需要 torch、numpy、pyarrow、tokenizers。
 - 磁盘：8 个 checkpoint，每个约 2.4 GB，共约 19 GB。
@@ -59,5 +70,5 @@ bash scripts/sft/run_sft_2k_muon.sh eval      # 评最终 checkpoint，输出 ru
 
 ## 解读注意
 
-- 旧的两个评测是在 3060 上算的，这次在 V100 上算。fp16 autocast 在不同显卡上的数值误差约在 1e-3 量级，远小于要比较的差异。
+- 旧的两个评测是在 3060 上算的，这次在二号机的 V100 上算（训练和评测都在二号机）。fp16 autocast 在不同显卡上的数值误差约在 1e-3 量级，远小于要比较的差异。
 - 2K Muon 基座只训了 2 轮（41.8 亿 tokens）。两个基座的预训练验证 loss 不能直接比，因为验证协议可能不完全一致（这次计分 260,118 个 token，旧 run 是 259,906 个）。以 SFT 测试集上的结果为准。
