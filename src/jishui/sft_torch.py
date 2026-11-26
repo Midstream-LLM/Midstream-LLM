@@ -1,4 +1,4 @@
-"""Single-GPU supervised fine-tuning on a compact SFT export.
+"""Supervised fine-tuning on a compact SFT export (one GPU, or torchrun DDP).
 
 Reads the layout written by scripts/sft/export_compact_sft.py (input_ids.npy,
 loss_mask.npy, sample_offsets.npy, {train,val}_indices.npy, records.parquet) and
@@ -7,6 +7,11 @@ supervised (assistant + <|im_end|>) tokens only. Micro-batches are built by a
 token budget from length-sorted pools so padding stays small; the whole batch
 plan is a pure function of (seed, epoch), so --resume restarts the exact step.
 Checkpoints use the pretraining format, so jishui.generate_torch can load them.
+
+Multi-GPU: ``torchrun --nproc_per_node=N -m jishui.sft_torch ...`` with
+grad_accum divisible by N. Each update's grad_accum micro-batches are split
+round-robin over ranks and normalized by the global target count, so every
+update sees exactly the single-process batch; only the speed changes.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import time
 from collections import defaultdict
 from contextlib import nullcontext
@@ -22,7 +28,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 
 from .checkpoints import latest_checkpoint
 from .checkpoints_torch import load_checkpoint, load_model_weights, save_checkpoint
@@ -104,12 +112,25 @@ def summed_loss(model, x, y):
                            ignore_index=-100, reduction="sum")
 
 
+def world() -> tuple[int, int]:
+    return (dist.get_rank(), dist.get_world_size()) if dist.is_initialized() else (0, 1)
+
+
+def barrier() -> None:
+    if dist.is_initialized():
+        dist.barrier()
+
+
 @torch.no_grad()
 def evaluate(model, data: CompactSFT, indices: np.ndarray, token_budget: int, device) -> dict:
-    """Token-weighted loss over supervised tokens, overall and per task."""
+    """Token-weighted loss over supervised tokens, overall and per task.
+    Under DDP the batches are sharded round-robin and the sums all-reduced."""
+    rank, size = world()
     model.eval()
     total, count = defaultdict(float), defaultdict(int)
-    for batch in batch_plan(data.lengths, indices, token_budget, seed=0, epoch=0):
+    for b, batch in enumerate(batch_plan(data.lengths, indices, token_budget, seed=0, epoch=0)):
+        if b % size != rank:
+            continue
         x, y = collate(data, batch, device)
         with autocast(device):
             logits = model(x)
@@ -120,6 +141,12 @@ def evaluate(model, data: CompactSFT, indices: np.ndarray, token_budget: int, de
             for key in (task, "all"):
                 total[key] += loss
                 count[key] += n
+    if size > 1:
+        keys = sorted({"all", *((data.tasks[i] for i in indices.tolist()) if data.tasks else ())})
+        sums = torch.tensor([[total[k], count[k]] for k in keys], dtype=torch.float64, device=device)
+        dist.all_reduce(sums)
+        total = {k: float(sums[j, 0]) for j, k in enumerate(keys) if sums[j, 1] > 0}
+        count = {k: float(sums[j, 1]) for j, k in enumerate(keys) if sums[j, 1] > 0}
     model.train()
     return {k: total[k] / count[k] for k in sorted(total)}
 
@@ -292,12 +319,23 @@ def check_expectations(args, data, total_steps, steps_per_epoch, parent=None):
 
 
 def run(args) -> dict:
+    rank, size = world()
     device = torch.device(args.device)
+    if device.type == "cuda" and size > 1:
+        device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", rank)))
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    if args.grad_accum % size:
+        raise ValueError(f"grad_accum {args.grad_accum} must be divisible by world size {size}")
     data = CompactSFT(args.data_dir)
     hyper = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()
              if k not in ("resume", "max_steps", "device", "run_dir", "init_from", "expect")}
     if args.config is not None:
         hyper["config_sha256"] = sha256_file(args.config)
+    # Same batches either way; recorded so a resume cannot silently change the
+    # rank count (absent for one process, keeping older checkpoints resumable).
+    if size > 1:
+        hyper["world_size"] = size
     plans = [batch_plan(data.lengths, data.splits["train"], args.micro_tokens, args.seed, e) for e in range(args.epochs)]
     steps_per_epoch = [math.ceil(len(p) / args.grad_accum) for p in plans]
     total_steps = sum(steps_per_epoch)
@@ -315,6 +353,7 @@ def run(args) -> dict:
         parent = json.loads((args.init_from / "train_state.json").read_text())
         check_expectations(args, data, total_steps, steps_per_epoch, parent)
         config = ModelConfig.from_dict(parent["model"])
+    barrier()  # every rank has checked the run directory before rank 0 writes
     if args.gradient_checkpointing:
         config = ModelConfig.from_dict({**config.to_dict(), "gradient_checkpointing": True})
     torch.manual_seed(args.seed)
@@ -335,7 +374,10 @@ def run(args) -> dict:
             "parent_checkpoint": str(args.init_from.resolve()), "parent_step": parent_state.get("step"),
             "total_steps": total_steps, "steps_per_epoch": steps_per_epoch,
             "train_samples": int(len(data.splits["train"])), "history": []}}
-        args.run_dir.mkdir(parents=True, exist_ok=True)
+        if rank == 0:
+            args.run_dir.mkdir(parents=True, exist_ok=True)
+    trainable = DistributedDataParallel(model, device_ids=[device.index] if device.type == "cuda" else None) \
+        if size > 1 else model
 
     tokenizer = None
     if args.tokenizer:
@@ -345,13 +387,16 @@ def run(args) -> dict:
 
     def record(entry):
         state["sft"]["history"].append(entry)
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        LOG.info(json.dumps(entry, ensure_ascii=False))
+        if rank == 0:
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            LOG.info(json.dumps(entry, ensure_ascii=False))
 
     def save():
         state["step"] = step
-        save_checkpoint(args.run_dir, state, model, optimizer, scaler, keep=args.keep_checkpoints)
+        if rank == 0:
+            save_checkpoint(args.run_dir, state, model, optimizer, scaler, keep=args.keep_checkpoints)
+        barrier()
 
     if step == 0:
         record({"step": 0, "val_loss": evaluate(model, data, data.splits["val"], args.micro_tokens, device)})
@@ -374,13 +419,26 @@ def run(args) -> dict:
         targets = sum(int(sum(int(data.mask[int(data.offsets[i]) + 1:int(data.offsets[i + 1])].sum())
                               for i in batch)) for batch in micro)
         optimizer.zero_grad(set_to_none=True)
-        loss_sum = 0.0
-        for batch in micro:
+        loss_sum, padded = 0.0, 0
+        mine = micro[rank::size]
+        for j, batch in enumerate(mine):
             x, y = collate(data, batch, device)
-            loss = summed_loss(model, x, y) / targets
-            scaler.scale(loss).backward()
+            sync = trainable.no_sync() if size > 1 and j < len(mine) - 1 else nullcontext()
+            with sync:
+                loss = summed_loss(trainable, x, y) / targets
+                # DDP averages over ranks; scaling by size keeps the global
+                # token-weighted mean of the single-process update.
+                scaler.scale(loss * size).backward()
             loss_sum += float(loss.detach())
-            window["padded"] += x.numel()
+            padded += x.numel()
+        if not mine:  # fewer micro-batches than ranks in the epoch's last update
+            x, y = collate(data, micro[0], device)
+            scaler.scale(summed_loss(trainable, x, y) * 0.0).backward()
+        if size > 1:
+            stats = torch.tensor([loss_sum, padded], dtype=torch.float64, device=device)
+            dist.all_reduce(stats)
+            loss_sum, padded = float(stats[0]), int(stats[1])
+        window["padded"] += padded
         scaler.unscale_(optimizer)
         norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip))
         scaler.step(optimizer)
@@ -403,20 +461,34 @@ def run(args) -> dict:
         if step % args.save_interval == 0 or step == total_steps:
             save()
     if step == total_steps:
-        samples = sample_generations(model, data, tokenizer, device)
-        (args.run_dir / "val_generations.json").write_text(json.dumps(samples, ensure_ascii=False, indent=2))
+        if rank == 0:
+            samples = sample_generations(model, data, tokenizer, device)
+            (args.run_dir / "val_generations.json").write_text(json.dumps(samples, ensure_ascii=False, indent=2))
+            (args.run_dir / "final.json").write_text(json.dumps(
+                {"step": step, "checkpoint": str(latest_checkpoint(args.run_dir)),
+                 "final_val_loss": state["sft"]["history"][-1].get("val_loss")}, ensure_ascii=False, indent=2))
         state["sft"]["complete"] = True
-        (args.run_dir / "final.json").write_text(json.dumps(
-            {"step": step, "checkpoint": str(latest_checkpoint(args.run_dir)),
-             "final_val_loss": state["sft"]["history"][-1].get("val_loss")}, ensure_ascii=False, indent=2))
+        barrier()
     elif args.max_steps is not None and step % args.save_interval:
         save()
     return state
 
 
 def main(argv=None):
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    run(parse_args(argv))
+    args = parse_args(argv)
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1 and not dist.is_initialized():
+        cuda = str(args.device).startswith("cuda")
+        if cuda:
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        dist.init_process_group("nccl" if cuda else "gloo")
+    rank, _ = world()
+    logging.basicConfig(level=logging.INFO if rank == 0 else logging.WARNING,
+                        format=f"%(asctime)s rank{rank} %(message)s")
+    try:
+        run(args)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

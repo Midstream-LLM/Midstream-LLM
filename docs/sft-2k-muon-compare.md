@@ -11,9 +11,9 @@
 
 ## 规则
 
-1. 所有影响结果的参数都写在 `configs/sft-v1-simplified-2k-muon.json` 里，**不要改动这个文件**。命令行也不能覆盖其中的配方参数，`sft_torch` 会直接报错。只允许用 `PYTHON`、`GPU` 两个环境变量指定解释器和使用哪张卡。
+1. 所有影响结果的参数都写在 `configs/sft-v1-simplified-2k-muon.json` 里，**不要改动这个文件**。命令行也不能覆盖其中的配方参数，`sft_torch` 会直接报错。只允许用 `PYTHON`、`NPROC`、`GPUS` 三个环境变量指定解释器、卡数和使用哪些卡。
 2. 配置中的 `expect` 一节会在训练前逐项核对：数据指纹、分词器 sha256、train/val/test 条数、父 checkpoint 的 step 和模型结构。**任何一项不符就停下来报告，不要为了让它通过而改配置或改数据。**
-3. 在二号机上单卡训练（默认 `GPU=0`；如果 0 号卡被占用，用 `GPU=<空闲卡号>`）。不要用 torchrun。
+3. 在二号机上用 **8 卡 DDP** 训练（脚本内部用 torchrun 启动，不要自己另起 torchrun）。每次更新要累积的 8 个 micro-batch 平均分给各卡，每卡 1 个，梯度 all-reduce 后按全局监督 token 数加权，所以每次更新看到的数据和单卡完全相同，只是更快，预计几分钟到十几分钟。卡被占用时可以用 `GPUS=0,1,2,3 NPROC=4` 之类的设置，`NPROC` 必须整除 8（1、2、4 或 8）。**开训后不能更换卡数**，resume 时卡数不同会被拒绝。评测只用第一张可见卡。
 4. 评测脚本的输出中只要出现 `STOP:` 就必须停下来报告，不要绕过。
 5. 训练中如果 loss 出现 NaN，或 val loss 连续两次评测上升超过 0.3，先停下来报告，不要自行改学习率重跑。
 
@@ -42,7 +42,7 @@
 ```bash
 CUDA_VISIBLE_DEVICES= PYTHONPATH=src .venv-torch/bin/python -m unittest tests.test_sft_torch tests.test_muon
 bash scripts/sft/run_sft_2k_muon.sh check     # 必须打印 CHECK OK；记下打印的每轮步数
-bash scripts/sft/run_sft_2k_muon.sh smoke     # 20 步；记录峰值显存、每步耗时、grad_norm
+bash scripts/sft/run_sft_2k_muon.sh smoke     # 8 卡 20 步；记录峰值显存、每步耗时、grad_norm
 bash scripts/sft/run_sft_2k_muon.sh start     # 正式训练，约 1,434 步
 bash scripts/sft/run_sft_2k_muon.sh eval      # 评最终 checkpoint，输出 runs/evaluations/sft-2k-muon/report.md
 ```

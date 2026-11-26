@@ -1,10 +1,13 @@
 import json
+import os
+import socket
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 
 from jishui.checkpoints_torch import save_checkpoint
 from jishui.config import ModelConfig
@@ -176,6 +179,70 @@ class StrictConfigTest(unittest.TestCase):
                     sft_torch.run(sft_torch.parse_args(["--config", str(config), "--run-dir", str(run_dir),
                                                         "--device", "cpu"]))
                 self.assertFalse((run_dir / "checkpoints").exists())
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _ddp_worker(rank, size, port, argv):
+    os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(size),
+                      MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    sft_torch.main(argv)
+
+
+class DistributedSFTTest(unittest.TestCase):
+    """2 gloo ranks must reproduce the single-process run (same batches per update)."""
+
+    def test_two_ranks_match_single_process_and_resume(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            write_compact(tmp / "data")
+            parent = write_parent(tmp / "parent")
+            for optimizer in ("adamw", "muon"):
+                with self.subTest(optimizer=optimizer):
+                    base = ["--data-dir", str(tmp / "data"), "--device", "cpu", "--micro-tokens", "64",
+                            "--grad-accum", "2", "--epochs", "2", "--eval-interval", "3", "--save-interval", "3",
+                            "--lr", "1e-3", "--optimizer", optimizer]
+                    single = tmp / f"single-{optimizer}"
+                    sft_torch.run(sft_torch.parse_args(base + ["--run-dir", str(single), "--init-from", str(parent)]))
+                    ddp = tmp / f"ddp-{optimizer}"
+                    mp.spawn(_ddp_worker, args=(2, _free_port(), base + ["--run-dir", str(ddp), "--init-from", str(parent)]),
+                             nprocs=2, join=True)
+                    a, b = weights(single), weights(ddp)
+                    for k in a:
+                        torch.testing.assert_close(b[k], a[k], rtol=1e-5, atol=1e-6, msg=k)
+                    one = [json.loads(l) for l in (single / "metrics.jsonl").read_text().splitlines()]
+                    two = [json.loads(l) for l in (ddp / "metrics.jsonl").read_text().splitlines()]
+                    self.assertEqual([r["step"] for r in one], [r["step"] for r in two])
+                    for r1, r2 in zip(one, two):
+                        if "val_loss" in r1:
+                            for k in r1["val_loss"]:
+                                self.assertAlmostEqual(r1["val_loss"][k], r2["val_loss"][k], places=4)
+                    self.assertTrue((ddp / "final.json").exists())
+                    # Exact resume under DDP; changing the rank count is rejected.
+                    part = tmp / f"part-{optimizer}"
+                    mp.spawn(_ddp_worker, args=(2, _free_port(), base + ["--run-dir", str(part), "--init-from",
+                             str(parent), "--max-steps", "4"]), nprocs=2, join=True)
+                    mp.spawn(_ddp_worker, args=(2, _free_port(), base + ["--run-dir", str(part), "--resume"]),
+                             nprocs=2, join=True)
+                    c = weights(part)
+                    for k in b:
+                        torch.testing.assert_close(c[k], b[k], rtol=0, atol=0, msg=k)
+                    with self.assertRaisesRegex(ValueError, "same data and hyperparameters"):
+                        sft_torch.run(sft_torch.parse_args(base + ["--run-dir", str(part), "--resume"]))
+
+    def test_grad_accum_must_divide_world_size(self):
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            write_compact(tmp / "data")
+            parent = write_parent(tmp / "parent")
+            argv = ["--data-dir", str(tmp / "data"), "--device", "cpu", "--micro-tokens", "64", "--grad-accum", "3",
+                    "--run-dir", str(tmp / "r"), "--init-from", str(parent)]
+            with self.assertRaises(Exception):
+                mp.spawn(_ddp_worker, args=(2, _free_port(), argv), nprocs=2, join=True)
 
 
 if __name__ == "__main__":
