@@ -1,5 +1,5 @@
 {
-  "comment": "Strict SFT recipe (main): 2K Muon base step 63784, 2026-11-24 2K recipe with Muon (+AdamW for embedding/norms) as the SFT optimizer. Do not edit; any mismatch must stop the run. See docs/sft-2k-muon-compare.md.",
+  "comment": "Strict SFT recipe tuned for Muon: 2K Muon base step 63784, sft_v1_simplified, Muon (+AdamW for embedding/norms). Not a replication of the 11-24 AdamW recipe. Do not edit; any expect mismatch must stop the run. See docs/sft-2k-muon-compare.md.",
   "sft": {
     "data_dir": "dataset/sft/sft_v1_simplified/compact_candidate_37_simplified",
     "init_from": "/data/jishui-docmask/runs/jishui-200m-v3-docmask-muon-8xv100/checkpoints/step_00063784",
@@ -7,14 +7,14 @@
     "epochs": 2,
     "micro_tokens": 4096,
     "grad_accum": 8,
-    "lr": 5e-05,
-    "min_lr": 5e-06,
+    "lr": 0.0001,
+    "min_lr": 1e-05,
     "warmup_steps": 50,
-    "weight_decay": 0.01,
+    "weight_decay": 0.1,
     "grad_clip": 1.0,
     "eval_interval": 200,
-    "save_interval": 400,
-    "keep_checkpoints": 2,
+    "save_interval": 200,
+    "keep_checkpoints": 8,
     "gradient_checkpointing": false,
     "seed": 1234,
     "optimizer": "muon"

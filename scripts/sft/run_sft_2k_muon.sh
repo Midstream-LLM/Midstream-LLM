@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# SFT of the 2K Muon base (2026-11-24 2K recipe; Muon SFT by default), then the comparison eval.
-# Everything that affects the result is pinned in the config JSON selected by VARIANT.
+# Muon SFT of the 2K Muon base, then the comparison eval.
+# Everything that affects the result is pinned in configs/sft-v1-simplified-2k-muon.json.
 #
 #   bash scripts/sft/run_sft_2k_muon.sh check    # config + data + parent checks only, no training
 #   bash scripts/sft/run_sft_2k_muon.sh smoke    # 20 updates into a throwaway run dir
 #   bash scripts/sft/run_sft_2k_muon.sh start    # the real run (~1,434 updates)
 #   bash scripts/sft/run_sft_2k_muon.sh resume   # exact resume after an interruption
 #   bash scripts/sft/run_sft_2k_muon.sh eval     # score the final checkpoint (final.json) against the 11-24 SFTs
+#   CKPT=<checkpoint dir> bash scripts/sft/run_sft_2k_muon.sh eval   # score another saved checkpoint
 #
-# Only PYTHON, GPU and VARIANT may be set from the environment.
+# Only PYTHON and GPU may be set from the environment.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -16,16 +17,9 @@ MODE="${1:-}"
 PYTHON="${PYTHON:-.venv-torch/bin/python}"
 export CUDA_VISIBLE_DEVICES="${GPU:-0}"
 export PYTHONPATH=src
-# VARIANT=muon (main: Muon SFT) or adamw (control: the original AdamW recipe).
-VARIANT="${VARIANT:-muon}"
-case "$VARIANT" in
-  muon)  SUFFIX="" ;;
-  adamw) SUFFIX="-adamw" ;;
-  *) echo "VARIANT must be muon or adamw" >&2; exit 2 ;;
-esac
-CONFIG="configs/sft-v1-simplified-2k-muon${SUFFIX}.json"
-RUN_DIR="runs/jishui-200m-sft-v1-simplified-2k-muon${SUFFIX}"
-EVAL_DIR="runs/evaluations/sft-2k-muon${SUFFIX}"
+CONFIG=configs/sft-v1-simplified-2k-muon.json
+RUN_DIR=runs/jishui-200m-sft-v1-simplified-2k-muon
+EVAL_DIR=runs/evaluations/sft-2k-muon
 
 train() { "$PYTHON" -m jishui.sft_torch --config "$CONFIG" --device cuda "$@"; }
 
@@ -54,9 +48,14 @@ EOF
     train --run-dir "$RUN_DIR" --resume
     ;;
   eval)
-    FINAL="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["checkpoint"])' "$RUN_DIR/final.json")"
+    if [ -n "${CKPT:-}" ]; then
+      TARGET="$CKPT"; OUT="$EVAL_DIR-$(basename "$CKPT")"
+    else
+      TARGET="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["checkpoint"])' "$RUN_DIR/final.json")"
+      OUT="$EVAL_DIR"
+    fi
     "$PYTHON" scripts/sft/eval_sft_compare.py --config "$CONFIG" \
-      --checkpoint "$FINAL" --out "$EVAL_DIR" --device cuda:0
+      --checkpoint "$TARGET" --out "$OUT" --device cuda:0
     ;;
   *)
     echo "usage: $0 check|smoke|start|resume|eval" >&2
