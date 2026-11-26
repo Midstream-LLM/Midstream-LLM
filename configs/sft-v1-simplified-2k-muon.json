@@ -1,0 +1,53 @@
+{
+  "comment": "Strict SFT recipe: 2K Muon base (step 63784) with the exact 2026-11-24 sft_v1_simplified 2K recipe. Do not edit; any mismatch must stop the run. See docs/sft-2k-muon-compare.md.",
+  "sft": {
+    "data_dir": "dataset/sft/sft_v1_simplified/compact_candidate_37_simplified",
+    "init_from": "/data/jishui-docmask/runs/jishui-200m-v3-docmask-muon-8xv100/checkpoints/step_00063784",
+    "tokenizer": "tokenizer/ccc-bbpe-32k/tokenizer.json",
+    "epochs": 2,
+    "micro_tokens": 4096,
+    "grad_accum": 8,
+    "lr": 5e-05,
+    "min_lr": 5e-06,
+    "warmup_steps": 50,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "eval_interval": 200,
+    "save_interval": 400,
+    "keep_checkpoints": 2,
+    "gradient_checkpointing": false,
+    "seed": 1234
+  },
+  "expect": {
+    "data_fingerprint": "fc098eca70b5b2889d4ec5a5a774518f6ec951bb97c2fba387b2f57d9d9662fd",
+    "tokenizer_sha256": "7cac6a27679aa6e766fac48b11f293b30b13b0223c455e1a3a8ab6b6eb220e26",
+    "train_samples": 140011,
+    "val_samples": 6859,
+    "test_samples": 6965,
+    "total_steps": 1434,
+    "steps_per_epoch": [
+      717,
+      717
+    ],
+    "parent_step": 63784,
+    "parent_model": {
+      "name": "Jishui-200M-Base",
+      "vocab_size": 32768,
+      "hidden_size": 704,
+      "num_hidden_layers": 30,
+      "num_attention_heads": 11,
+      "num_key_value_heads": 11,
+      "head_dim": 64,
+      "intermediate_size": 1856,
+      "norm_type": "layernorm",
+      "norm_eps": 1e-05,
+      "norm_bias": true,
+      "rope_theta": 10000,
+      "max_position_embeddings": 2048,
+      "tie_word_embeddings": true,
+      "attention_bias": false,
+      "mlp_bias": false,
+      "gradient_checkpointing": false
+    }
+  }
+}

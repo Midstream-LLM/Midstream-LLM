@@ -111,3 +111,7 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 ## 文档内注意力隔断 + 8×V100 DDP（2026-11-25，优先于前节）
 - 32K 基座 SFT 不如 2K，疑因更新次数少（15,946 步）与跨文档注意力。新增 `pretraining.attention: "document"`（默认 causal，SFT/推理不变）与 torchrun DDP（仅 shuffled_blocks；全局同一 sampler 按行切分，checkpoint 与单进程等价）。
 - 配置 `configs/jishui-200m-v3-docmask-8xv100.json`（2K、全局 65,536 tokens/步、Muon+AdamW、lr 5e-4、4 epoch = 8,364,265,088 tokens / 127,629 次更新、从零；`pretraining.optimizer`，实现在 `src/jishui/optim_torch.py`）；启动 `bash scripts/train_8xv100_docmask.sh smoke|start|resume`。细节、测试与核对项见 `docs/doc-attention-8xv100.md`。V100 上未实测，先跑 smoke。
+
+## 2K Muon 基座 SFT 对比（2026-11-26）
+- 2K Muon 主训练已完成（step 63,784，固定验证 2.987）；32K 扩展因 RoPE θ 未调整而失败，暂不使用。
+- 按 11-24 旧 2K SFT 原配方对 2K Muon 基座做 SFT：严格配置 `configs/sft-v1-simplified-2k-muon.json`（`sft_torch --config`，配方不可被命令行覆盖，`expect` 不符即停），启动 `bash scripts/sft/run_sft_2k_muon.sh check|smoke|start|resume|eval`，评测 `scripts/sft/eval_sft_compare.py`。执行规则与回传清单见 `docs/sft-2k-muon-compare.md`。
