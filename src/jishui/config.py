@@ -28,8 +28,13 @@ class ModelConfig:
     qk_norm: bool = False
     attn_output_gate: bool = False
     gradient_checkpointing: bool = True
+    # DeepSeek-V3-style multi-token prediction modules (training only). 0 keeps
+    # the original architecture and is omitted from to_dict for old checkpoints.
+    mtp_depth: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.mtp_depth) is not int or self.mtp_depth < 0:
+            raise ValueError("mtp_depth must be a nonnegative integer")
         if min(
             self.vocab_size,
             self.hidden_size,
@@ -61,7 +66,10 @@ class ModelConfig:
             return cls.from_dict(json.load(handle))
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        if not value["mtp_depth"]:
+            del value["mtp_depth"]
+        return value
 
 
 @dataclass(frozen=True)

@@ -31,7 +31,7 @@ from .checkpoints_torch import import_mlx, load_checkpoint, load_model_weights, 
 from .config import load_run_config
 from .data import PackedBatchIterator, SequentialBatchIterator, ShuffledDocumentIterator, load_or_build_index, load_sampling_config
 from .block_data import SampleSpec, TokenBatch, ShuffledBlockIterator, FixedValidation
-from .model_torch import JishuiForCausalLM, causal_lm_loss
+from .model_torch import JishuiForCausalLM, causal_lm_loss, mtp_lm_loss
 from .optim_torch import build_optimizer
 from .schedules_torch import continuation_lr, make_continuation_schedule, make_pretraining_schedule
 from .tracking import ExperimentTracker
@@ -77,6 +77,17 @@ def segment_ids(batch):
     Padding (-1) only attends to padding and is never a target.
     """
     return batch.document_ids[:, 1:batch.spec.seq_len+1]
+
+
+def mtp_tensors(batch, device, depth):
+    """Future input token i+k and target i+k+1 for each MTP depth k.
+
+    Targets at offset > 1 never cross a document boundary (TokenBatch default)."""
+    length = batch.spec.seq_len
+    inputs = [torch.as_tensor(np.ascontiguousarray(batch.tokens[:, k:k+length]), device=device)
+              for k in range(1, depth+1)]
+    targets = [torch.as_tensor(batch.targets(k+1)[0], device=device) for k in range(1, depth+1)]
+    return inputs, targets
 
 
 def tensor_batch(batch, device, document_attention=False):
@@ -239,8 +250,21 @@ def run(args, tracker):
         raise ValueError("--migrate-from requires a new shuffled-block pretraining run")
     spec = SampleSpec(config.seq_len, tuple((pretraining or {}).get("prediction_offsets", [1])),
                       config.eod_token_id)
-    if spec.prediction_offsets != (1,):
-        raise ValueError("MTP data interface is available, but this trainer currently implements NTP only")
+    # Validation always scores next-token prediction on the NTP block protocol,
+    # so MTP runs stay comparable with (and share fingerprints of) plain runs.
+    validation_spec = SampleSpec(config.seq_len, (1,), config.eod_token_id)
+    mtp = (pretraining or {}).get("mtp")
+    mtp_depth = model_config.mtp_depth
+    if mtp is not None:
+        if not isinstance(mtp, dict) or set(mtp) - {"depth", "weight"}:
+            raise ValueError("pretraining.mtp takes depth and weight")
+        mtp_weight = float(mtp.get("weight", 0.3))
+        if not block_mode or mtp.get("depth") != mtp_depth or mtp_depth < 1 or not mtp_weight > 0:
+            raise ValueError("MTP needs shuffled_blocks, pretraining.mtp.depth == model.mtp_depth >= 1, weight > 0")
+    elif mtp_depth:
+        raise ValueError("model.mtp_depth requires pretraining.mtp")
+    if spec.prediction_offsets != tuple(range(1, mtp_depth + 2)):
+        raise ValueError("prediction_offsets must be [1, ..., mtp_depth + 1]")
     target_tokens = int((pretraining if new_corpus else continuation)["target_tokens"])
     if target_tokens <= 0:
         raise ValueError("target_tokens must be positive")
@@ -280,8 +304,9 @@ def run(args, tracker):
     optimizer = build_optimizer(model, config, optimizer_settings)
     scaler = torch.amp.GradScaler("cuda", init_scale=config.loss_scale, enabled=device.type == "cuda")
     gpu_name = torch.cuda.get_device_name() if device.type == "cuda" else "cpu"
-    LOG.info("device=%s torch=%s parameters=%d world_size=%d attention=%s optimizer=%s", gpu_name,
-             torch.__version__, sum(p.numel() for p in model.parameters()), size, attention, optimizer_name)
+    LOG.info("device=%s torch=%s parameters=%d world_size=%d attention=%s optimizer=%s mtp_depth=%d",
+             gpu_name, torch.__version__, sum(p.numel() for p in model.parameters()), size, attention,
+             optimizer_name, mtp_depth)
     native = checkpoint is not None and (checkpoint / "training.pt").exists()
     if new_corpus and checkpoint and not native:
         raise ValueError("new-corpus resume requires its own PyTorch checkpoint")
@@ -386,7 +411,7 @@ def run(args, tracker):
     if validation:
         if validation.get("mode") != "source_stratified_blocks" or set(validation) - {"mode", "seed"}:
             raise ValueError("unsupported validation configuration")
-        fixed = FixedValidation(index, spec, config.eval_batches, config.batch_size,
+        fixed = FixedValidation(index, validation_spec, config.eval_batches, config.batch_size,
                                 validation.get("seed", config.seed))
         if native and not migrating and state.get("evaluation") != fixed.metadata:
             raise ValueError("resume changed validation sample protocol")
@@ -435,6 +460,7 @@ def run(args, tracker):
     last_saved = step
     limit = step + args.steps if args.steps else (math.inf if block_mode else final_step)
     window = dict(state.get("log_window", {"loss_sum": 0.0, "tokens": 0, "steps": 0}))
+    mtp_window = [[0.0]*mtp_depth, [0]*mtp_depth]  # logging only; not exact-resume state
 
     def save():
         if rank == 0:
@@ -473,21 +499,39 @@ def run(args, tracker):
             update_tokens = sum(int(batch.targets(1)[1].sum()) if isinstance(batch, TokenBatch)
                                 else config.seq_len*config.batch_size for batch in batches)
             local = [rows(batch, rank, size) for batch in batches]
+            # Per-depth MTP target counts over the global update.
+            mtp_tokens = [max(1, sum(int(b.targets(k+1)[1].sum()) for b in batches))
+                          for k in range(1, mtp_depth+1)]
             counts = [int(batch.targets(1)[1].sum()) if isinstance(batch, TokenBatch)
                       else config.seq_len*config.batch_size for batch in local]
-            total_loss = 0.0
+            total_loss, mtp_sums = 0.0, [0.0]*mtp_depth
             for i, (batch, count) in enumerate(zip(local, counts)):
                 x, y, seg = tensor_batch(batch, device, document_attention)
                 sync = nullcontext() if size == 1 or i == len(local)-1 else trainable.no_sync()
                 with sync:
                     with autocast(device):
-                        loss = causal_lm_loss(trainable, x, y, seg)
+                        if mtp_depth:
+                            future, future_targets = mtp_tensors(batch, device, mtp_depth)
+                            main, sums = mtp_lm_loss(trainable, x, y, future, future_targets, seg)
+                            for k, value in enumerate(sums):
+                                mtp_sums[k] += float(value.detach())
+                            # Scaled so the global update equals
+                            # main_sum/N + weight * mean_k(mtp_sum_k/N_k).
+                            extra = sum(v / n for v, n in zip(sums, mtp_tokens)) * mtp_weight / mtp_depth
+                        else:
+                            main = causal_lm_loss(trainable, x, y, seg)
+                            extra = None
+                        # Same arithmetic as before for plain NTP (bitwise-stable runs).
+                        loss = main * (count * size / update_tokens)
+                        if extra is not None:
+                            loss = loss + extra * size
                     if not torch.isfinite(loss):
                         raise FloatingPointError(f"non-finite loss before update {step + 1}")
-                    total_loss += float(loss.detach()) * count
+                    # Logged train/loss stays the plain NTP loss for comparability.
+                    total_loss += float(main.detach()) * count
                     # DDP averages gradients over ranks; multiplying by size makes
                     # the result the token-weighted mean over the global batch.
-                    scaler.scale(loss * (count * size / update_tokens)).backward()
+                    scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             lr = continuation_lr(schedule, step)
@@ -507,9 +551,12 @@ def run(args, tracker):
         else:
             raise FloatingPointError("gradient overflow persisted after 8 retries")
         if size > 1:
-            reduced = torch.tensor([total_loss], dtype=torch.float64, device=device)
+            reduced = torch.tensor([total_loss, *mtp_sums], dtype=torch.float64, device=device)
             dist.all_reduce(reduced)
-            total_loss = float(reduced.item())
+            total_loss, *mtp_sums = map(float, reduced.tolist())
+        for k in range(mtp_depth):
+            mtp_window[0][k] += mtp_sums[k]
+            mtp_window[1][k] += mtp_tokens[k]
         step += 1
         tokens_seen += update_tokens
         window["loss_sum"] += total_loss
@@ -535,7 +582,15 @@ def run(args, tracker):
                      update_tokens / elapsed, torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0,
                      scaler.get_scale(), max(0, target_tokens - tokens_seen) / average_rate / 3600,
                      window["steps"], window["tokens"])
+            if mtp_depth:
+                depth_losses = [s / max(n, 1) for s, n in zip(*mtp_window)]
+                tracker.log({"train/mtp_loss": sum(depth_losses) / mtp_depth,
+                             **{f"train/mtp{k+1}_loss": v for k, v in enumerate(depth_losses)}},
+                            step, tokens_seen)
+                LOG.info("step=%d mtp_loss=%s weight=%.2f", step,
+                         " ".join(f"{v:.4f}" for v in depth_losses), mtp_weight)
             window = {"loss_sum": 0.0, "tokens": 0, "steps": 0}
+            mtp_window = [[0.0]*mtp_depth, [0]*mtp_depth]
         if config.eval_interval > 0 and step % config.eval_interval == 0:
             tracker.validation(validation_report(model, index, config, device, step,
                 max_categories=pretraining.get("eval_categories", 12) if new_corpus else None, fixed=fixed,

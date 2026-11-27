@@ -96,13 +96,13 @@ class MuonAdamW(torch.optim.Optimizer):
 
 
 def muon_parameters(model: nn.Module):
-    """Hidden 2D matrices inside transformer blocks use Muon; embeddings (tied
-    with the output head), norms and biases use AdamW."""
+    """Hidden 2D matrices inside transformer blocks (main layers and MTP modules)
+    use Muon; embeddings (tied with the output head), norms and biases use AdamW."""
     muon, adam = [], []
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        (muon if name.startswith("layers.") and p.dim() == 2 else adam).append(p)
+        (muon if name.startswith(("layers.", "mtp.")) and p.dim() == 2 else adam).append(p)
     return muon, adam
 
 

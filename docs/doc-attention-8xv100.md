@@ -69,7 +69,8 @@ Release3 32K 基座（step 15,946）做 SFT 后不如 2K 基座。两个基座�
 
 ## 600M v4 配置 `configs/jishui-600m-v4-docmask-8xv100.json`（2026-11-27）
 
-- 与 `jishui-600m-v3-docmask-8xv100.json` 只差数据相关字段：`tokenizer_sha256` 改为 `v4-bbpe-32k`，`data.script_conversion="none"`（训练启动和恢复时核验数据未转简）。
+- **开 MTP（2026-11-27）**：`model.mtp_depth=1`、`pretraining.prediction_offsets=[1, 2]`、`pretraining.mtp={"depth": 1, "weight": 0.3}`，实现与目标函数见 `docs/mtp-3060.md`。主模型 700,665,600 参数，MTP 模块 25,238,016（一个 600M Transformer 块加 2d→d 投影，含 QK-Norm 与输出门）；`mtp.*` 的二维矩阵与主干一样走 Muon，norm 走 AdamW。MTP 层跟随文档隔断，跨文档的偏移 2 目标被屏蔽。计算量估计多 5–8%（31 层对 30 层，外加一次输出层），每卡显存多一份 4×2048×32768 的 logits（fp32 约 1 GiB），以 smoke 实测为准；OOM 时按下文改 batch 2 × accum 2。`train/loss` 仍是纯 NTP，验证只评主头。导出给 SFT/推理用 `checkpoints_torch.strip_mtp`。run 名改为 `jishui-600m-v4-docmask-muon-mtp1-8xv100`，RUN_DIR 同名。
+- 与 `jishui-600m-v3-docmask-8xv100.json` 的其他差别是数据相关字段：`tokenizer_sha256` 改为 `v4-bbpe-32k`，`data.script_conversion="none"`（训练启动和恢复时核验数据未转简）。
 - 数据 `dataset/corpus-date-open-v4`：训练集 3,500,953,270 tokens、6,166,111 行（span 裁剪后一篇可多行，每行一个 EOD）；验证集 12,102 行 / 4,590,962 tokens，测试集 11,096 行 / 4,660,025 tokens。
 - 预算 4 ×（3,500,953,270 + 6,166,111）= 14,028,477,524 tokens，214,058 步，约每参数 20 个 token。按 v3 实测速度推算，用时约为 v3 600M 计划的 1.7 倍。
 - **开训前要核对**：smoke 日志里的 `usable_train_tokens` 和训练行数要与上面一致，不一致就按同一公式改 `target_tokens` 和 `max_steps`。验证集来源比 v3 多了 B 的简体副本，protocol 指纹会和 v3 不同，loss 不能和 v3 直接比（词表也不同，要比就换算成每字符 bits）。

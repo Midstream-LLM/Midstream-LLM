@@ -18,7 +18,8 @@
     "tie_word_embeddings": true,
     "attention_bias": false,
     "mlp_bias": false,
-    "gradient_checkpointing": true
+    "gradient_checkpointing": true,
+    "mtp_depth": 1
   },
   "training": {
     "seed": 42,
@@ -52,7 +53,8 @@
     "sampling": "shuffled_blocks",
     "eval_categories": 0,
     "prediction_offsets": [
-      1
+      1,
+      2
     ],
     "validation": {
       "mode": "source_stratified_blocks",
@@ -64,6 +66,10 @@
       "momentum": 0.95,
       "nesterov": true,
       "ns_steps": 5
+    },
+    "mtp": {
+      "depth": 1,
+      "weight": 0.3
     }
   },
   "data": {
@@ -77,7 +83,7 @@
     "mode": "offline",
     "entity": "liangsidi-university-of-electronic-science-and-technolog",
     "project": "Jishui",
-    "name": "jishui-600m-v4-docmask-muon-8xv100",
+    "name": "jishui-600m-v4-docmask-muon-mtp1-8xv100",
     "tags": [
       "600m",
       "700m-gated",
@@ -94,7 +100,8 @@
       "validation-source-stratified-v1",
       "muon",
       "tokenizer-v4-bbpe-32k",
-      "hans-hant"
+      "hans-hant",
+      "mtp1"
     ]
   }
 }

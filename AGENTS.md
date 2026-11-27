@@ -101,7 +101,7 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 
 ## 块级打乱续训（2026-11-18，优先于前节）
 - 用户批准修复长书连续采样及验证前缀偏差。新模块 `src/jishui/block_data.py` 保留完整文档 NPY，以 2K + NTP 的全局块排列训练；尾块 mask、有效 token 加权、确定性恢复均已实现。训练 loss 为日志区间平均。
-- 已预留可变长度、预测偏移、文档/段边界及 lookahead 接口；通过 256K 数据窗口和 MTP 目标 mask 测试。**模型尚未实现 MTP 或 128K attention/位置编码方案**，trainer 明确拒绝开启非 NTP 目标。
+- 已预留可变长度、预测偏移、文档/段边界及 lookahead 接口；通过 256K 数据窗口和 MTP 目标 mask 测试。**模型尚未实现 128K attention/位置编码方案**。（MTP 已于 2026-11-25 实现，见文末 MTP 一节。）
 - 固定验证从所有 7 个已有验证来源全范围分层抽 128 块（259,906 个有效 tokens），逐来源评估并按完整留出集来源 token 量加权。gutenberg、wanli、dongfang_ocr、shenbao_ocr 没有留出数据，报告明确记录，不挪用训练集。
 - 旧 v3 run 在完整 checkpoint `step_00016483` / 270,057,472 tokens 停止。新 run `runs/jishui-200m-corpus-date-open-v3-blocks` 通过 `--migrate-from` 保留权重、Adam、GradScaler、RNG、学习率和原预算，仅重排当前 epoch 未读后缀；后续使用 `--resume latest`。
 - 部署 `deployments/corpus-blocks-v1-20261118/runtime`；配置 `configs/jishui-200m-corpus-date-open-v3-blocks.json`。39 项服务器 CPU 测试、20 步 CUDA 短测通过；完整保存 `step_00016503` 后启动正式恢复。真实迁移前后权重/Adam/Scaler/CPU+CUDA RNG 已逐项相等核验。
@@ -120,4 +120,8 @@ plain UTF-8（17 个文件带 BOM），**简繁混杂**（正史等多为简体�
 - 模型架构在 `feat/doc-attention-8xv100` 升级落地：保持 30 层深度，`hidden_size=1280`，解耦宽头 4:1 GQA（`16Q / 4KV, head_dim=128, q_dim=2048`），SwiGLU `intermediate_size=3328`（不裁减 FFN），`RMSNorm(eps=1e-6)`（显式 fp32 均方根累加防 V100 fp16 溢出），开启 `qk_norm=true` 与独立 `attn_output_gate=true`（SDPA 输出后接独立 `gate_proj` + `Sigmoid`，绝不与 `q_proj` 拼接，由 Muon 独立正交化），`rope_theta=1_000_000` 预留 32K 扩窗。精确总参 **700,665,600**（700.67M，非嵌 658.72M）。
 - 旧 200M checkpoint 完全向后兼容（`checkpoints_torch.check_model_config` 对旧快照默认补齐 `qk_norm=False, attn_output_gate=False`）。
 - 8×V100 4-epoch 预训练配置：`configs/jishui-600m-v3-docmask-8xv100.json`（2K、65,536 tok/step、Muon lr 4e-4→4e-5、warmup 1500、`gradient_checkpointing=true`）；可用 `CONFIG=configs/jishui-600m-v3-docmask-8xv100.json RUN_DIR=runs/jishui-600m-v3-docmask-muon-8xv100 bash scripts/train_8xv100_docmask.sh smoke|start|resume` 启动。
-- **v4 数据版（2026-11-27，优先于上一条的 v3 配置）**：`configs/jishui-600m-v4-docmask-8xv100.json`，结构与 v3 版相同；数据 `dataset/corpus-date-open-v4`（中流 v4 A 原文 + B 繁体书简体副本，繁简都练、不转简），tokenizer `v4-bbpe-32k`（vocab 仍 32768）。训练集 3,500,953,270 tokens / 6,166,111 行，4 epoch = 14,028,477,524 tokens / 214,058 步（用户定 4 遍，约每参数 20 token）。启动：`CONFIG=configs/jishui-600m-v4-docmask-8xv100.json DATA_DIR=dataset/corpus-date-open-v4 RUN_DIR=runs/jishui-600m-v4-docmask-muon-8xv100 bash scripts/train_8xv100_docmask.sh smoke|start|resume`。数据制作见 `docs/corpus-pretraining.md`“v4 繁简合并”，tokenizer 见 `docs/tokenizer.md` §5。
+- **v4 数据版（2026-11-27，优先于上一条的 v3 配置）**：`configs/jishui-600m-v4-docmask-8xv100.json`，结构与 v3 版相同；数据 `dataset/corpus-date-open-v4`（中流 v4 A 原文 + B 繁体书简体副本，繁简都练、不转简），tokenizer `v4-bbpe-32k`（vocab 仍 32768）。训练集 3,500,953,270 tokens / 6,166,111 行，4 epoch = 14,028,477,524 tokens / 214,058 步（用户定 4 遍，约每参数 20 token）。启动：`CONFIG=configs/jishui-600m-v4-docmask-8xv100.json DATA_DIR=dataset/corpus-date-open-v4 RUN_DIR=runs/jishui-600m-v4-docmask-muon-mtp1-8xv100 bash scripts/train_8xv100_docmask.sh smoke|start|resume`。**开 MTP**（2026-11-27 用户要求，D=1、λ=0.3，`mtp.*` 二维矩阵也走 Muon；主模型 700.67M + MTP 25.24M）。数据制作见 `docs/corpus-pretraining.md`“v4 繁简合并”，tokenizer 见 `docs/tokenizer.md` §5。
+
+## MTP 单变量试验（3060，2026-11-25）
+- 实现 DeepSeek-V3 风格 MTP（`model.mtp_depth`、`pretraining.mtp`、`prediction_offsets [1..D+1]`；`mtp.*` 仅训练用，`checkpoints_torch.strip_mtp` 导出主模型）。验证只评主头 NTP，协议指纹与 2K blocks 基线相同。
+- **只在 3060 上试**：`configs/jishui-200m-v3-mtp1-3060.json`（与 2K blocks 基线只差 MTP：D=1、λ=0.3、4.0B tokens、从零），`bash scripts/train_3060_mtp.sh smoke|start|resume`。说明见 `docs/mtp-3060.md`。（原写“8×V100 不开 MTP”，已被 600M v4 配置取代：2026-11-27 起 600M v4 开 MTP。）
