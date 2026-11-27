@@ -67,6 +67,13 @@ Release3 32K 基座（step 15,946）做 SFT 后不如 2K 基座。两个基座�
 - 固定验证：`eval_batches 32 × batch 4 = 128` 块，seed 20261118，SampleSpec 与 2K blocks run 相同，所以验证协议指纹应当一致，可以直接和 2K run 的 3.237 比较。**启动日志里打印的 protocol 指纹要核对一下。**
 - 显存估计：每卡约 15 GiB（3060 上 batch 1 的峰值是 6.3 GiB）。如果 OOM，把 `batch_size` 改成 2、`grad_accum_steps` 改成 2，全局 batch 不变；但验证块数会跟着变，需要同时把 `eval_batches` 改成 64。
 
+## 600M v4 配置 `configs/jishui-600m-v4-docmask-8xv100.json`（2026-11-27）
+
+- 与 `jishui-600m-v3-docmask-8xv100.json` 只差数据相关字段：`tokenizer_sha256` 改为 `v4-bbpe-32k`，`data.script_conversion="none"`（训练启动和恢复时核验数据未转简）。
+- 数据 `dataset/corpus-date-open-v4`：训练集 3,500,953,270 tokens、6,166,111 行（span 裁剪后一篇可多行，每行一个 EOD）；验证集 12,102 行 / 4,590,962 tokens，测试集 11,096 行 / 4,660,025 tokens。
+- 预算 4 ×（3,500,953,270 + 6,166,111）= 14,028,477,524 tokens，214,058 步，约每参数 20 个 token。按 v3 实测速度推算，用时约为 v3 600M 计划的 1.7 倍。
+- **开训前要核对**：smoke 日志里的 `usable_train_tokens` 和训练行数要与上面一致，不一致就按同一公式改 `target_tokens` 和 `max_steps`。验证集来源比 v3 多了 B 的简体副本，protocol 指纹会和 v3 不同，loss 不能和 v3 直接比（词表也不同，要比就换算成每字符 bits）。
+
 ## 服务器操作
 
 ```bash

@@ -1,0 +1,32 @@
+{
+  "algorithm": "byte-level-bpe",
+  "source": "dataset/processed/tokenizer-v4-sample/train.jsonl",
+  "input_every_nth_line": 4,
+  "vocab_size_requested": 32768,
+  "vocab_size_actual": 32768,
+  "min_frequency": 2,
+  "normalization": "none",
+  "pre_tokenizer": {
+    "split_regex": "\\p{Han}+|\\p{N}|(?:(?!\\p{Han})[\\p{L}\\p{M}])+|　+|\\n+|[^\\S\\n　]+|[^\\s\\p{L}\\p{M}\\p{N}]",
+    "then": "ByteLevel(add_prefix_space=False, use_regex=False)",
+    "training_split_regex": "\\p{Han}{1,4}|\\p{N}|(?:(?!\\p{Han})[\\p{L}\\p{M}])+|　+|\\n+|[^\\S\\n　]+|[^\\s\\p{L}\\p{M}\\p{N}]"
+  },
+  "special_tokens": [
+    "<|pad|>",
+    "<|unk|>",
+    "<|endoftext|>",
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|reserved_0|>",
+    "<|reserved_1|>",
+    "<|reserved_2|>",
+    "<|reserved_3|>",
+    "<|reserved_4|>",
+    "<|reserved_5|>",
+    "<|reserved_6|>",
+    "<|reserved_7|>",
+    "<|reserved_8|>",
+    "<|reserved_9|>",
+    "<|reserved_10|>"
+  ]
+}

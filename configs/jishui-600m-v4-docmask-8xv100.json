@@ -1,0 +1,100 @@
+{
+  "model": {
+    "name": "Jishui-600M-Base",
+    "vocab_size": 32768,
+    "hidden_size": 1280,
+    "num_hidden_layers": 30,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 4,
+    "head_dim": 128,
+    "intermediate_size": 3328,
+    "norm_type": "rmsnorm",
+    "norm_eps": 1e-06,
+    "norm_bias": false,
+    "qk_norm": true,
+    "attn_output_gate": true,
+    "rope_theta": 1000000,
+    "max_position_embeddings": 2048,
+    "tie_word_embeddings": true,
+    "attention_bias": false,
+    "mlp_bias": false,
+    "gradient_checkpointing": true
+  },
+  "training": {
+    "seed": 42,
+    "dtype": "float16",
+    "loss_scale": 256.0,
+    "seq_len": 2048,
+    "batch_size": 4,
+    "grad_accum_steps": 1,
+    "max_steps": 214058,
+    "learning_rate": 0.0004,
+    "min_learning_rate": 4e-05,
+    "warmup_steps": 1500,
+    "weight_decay": 0.1,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "adam_eps": 1e-05,
+    "grad_clip": 1.0,
+    "log_interval": 10,
+    "eval_interval": 500,
+    "eval_batches": 32,
+    "save_interval": 1000,
+    "max_checkpoints": 3,
+    "optimizer_checkpoints": 3,
+    "sampling_mode": "target",
+    "eod_token_id": 2,
+    "compile_step": false
+  },
+  "pretraining": {
+    "target_tokens": 14028477524,
+    "schedule": "cosine",
+    "sampling": "shuffled_blocks",
+    "eval_categories": 0,
+    "prediction_offsets": [
+      1
+    ],
+    "validation": {
+      "mode": "source_stratified_blocks",
+      "seed": 20261118
+    },
+    "attention": "document",
+    "optimizer": {
+      "name": "muon",
+      "momentum": 0.95,
+      "nesterov": true,
+      "ns_steps": 5
+    }
+  },
+  "data": {
+    "category_mode": "labels",
+    "before_year": 1945,
+    "tokenizer_sha256": "1dfcf66ab75d71aaa3ec35d4941fc9449a89fd2350feee0645af0610a42a26dc",
+    "date_policy": "exclude_known_late",
+    "script_conversion": "none"
+  },
+  "tracking": {
+    "mode": "offline",
+    "entity": "liangsidi-university-of-electronic-science-and-technolog",
+    "project": "Jishui",
+    "name": "jishui-600m-v4-docmask-muon-8xv100",
+    "tags": [
+      "600m",
+      "700m-gated",
+      "cuda",
+      "8xv100",
+      "ddp",
+      "date-open",
+      "corpus-v4",
+      "cosine",
+      "blocks-v1",
+      "document-attention",
+      "qk-norm",
+      "gated-attention",
+      "validation-source-stratified-v1",
+      "muon",
+      "tokenizer-v4-bbpe-32k",
+      "hans-hant"
+    ]
+  }
+}

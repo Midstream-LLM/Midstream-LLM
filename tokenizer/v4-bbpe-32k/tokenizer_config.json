@@ -1,0 +1,24 @@
+{
+  "backend": "tokenizers",
+  "clean_up_tokenization_spaces": false,
+  "eos_token": "<|endoftext|>",
+  "extra_special_tokens": [
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|reserved_0|>",
+    "<|reserved_1|>",
+    "<|reserved_2|>",
+    "<|reserved_3|>",
+    "<|reserved_4|>",
+    "<|reserved_5|>",
+    "<|reserved_6|>",
+    "<|reserved_7|>",
+    "<|reserved_8|>",
+    "<|reserved_9|>",
+    "<|reserved_10|>"
+  ],
+  "model_max_length": 2048,
+  "pad_token": "<|pad|>",
+  "tokenizer_class": "TokenizersBackend",
+  "unk_token": "<|unk|>"
+}
