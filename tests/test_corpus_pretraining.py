@@ -48,20 +48,22 @@ class CorpusPretrainingTests(unittest.TestCase):
                 "source": "fixture", "composed_years": {"start_year": start, "end_year": end}
                 if start is not None or end is not None else None, "text": text}
 
-    def write_export(self):
+    def write_export(self, directory=None, records=None, export_id=10):
+        directory, records = directory or self.export, records or self.records
+        directory.mkdir(exist_ok=True)
         manifest = {"format": "jsonl", "unit": "document", "compression": None,
-                    "release_id": 9, "export_id": 10, "content_digest": "fixture",
+                    "release_id": export_id - 1, "export_id": export_id, "content_digest": "fixture",
                     "recipe": {"name": "fixture"}, "template": {"format": "[{title} ]{text}", "ratio": 1, "seed": 0},
-                    "fields": list(self.records[0]), "files": []}
+                    "fields": list(records[0]), "files": []}
         for split in ("train", "val", "test"):
-            rows = [r for r in self.records if r["split"] == split]
+            rows = [r for r in records if r["split"] == split]
             if not rows:
                 continue
-            path = self.export / f"{split}.jsonl"
+            path = directory / f"{split}.jsonl"
             path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
             manifest["files"].append({"file": path.name, "split": split, "rows": len(rows),
                                       "bytes": path.stat().st_size, "sha256": sha256(path)})
-        (self.export / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     def prepare(self, name="data"):
         path = self.root / name
@@ -99,6 +101,34 @@ class CorpusPretrainingTests(unittest.TestCase):
             self.prepare()
         self.assertFalse((self.root / "data").exists())
         self.assertFalse(list(self.root.glob(".data-*")))
+
+    def test_original_script_plus_simplified_copy_segments(self):
+        for row in self.records:
+            row["segment"] = 0
+        self.records.append(dict(self.record(1, "train", "经", 100, 200, "正文"), segment=1))
+        self.write_export()
+        copy_dir = self.root / "copy"
+        copies = [dict(self.record(1, "train", "经", 100, 200, "《史记》 司马迁 古文 正文"), version_id=901, segment=0)]
+        self.write_export(copy_dir, copies, export_id=11)
+        data = self.root / "both"
+        report = prepare([self.export, copy_dir], data, self.tokenizer_path, script_conversion="none")
+        self.assertEqual(report["documents"], 5)
+        self.assertEqual([e["export_id"] for e in report["source_exports"]], [10, 11])
+        rows = [json.loads(line) for line in (data / "manifest/docs_tokens.jsonl").read_text().splitlines()]
+        shard = lambda r: np.load(data / "tokens" / f"shard_{r['shard']:05d}.npy")
+        by_version = {(r["version_id"], r["segment"]): shard(r)[r["offset"]:r["offset"] + r["tokens"]].tolist()
+                      for r in rows if r["doc_id"] == 1}
+        self.assertEqual(by_version, {(101, 0): [0, 0, 5, 6], (101, 1): [6], (901, 0): [3, 4, 5, 6]})
+        validate_training_data(data, before_year=1945, vocab_size=19, script_conversion="none")
+        with self.assertRaisesRegex(ValueError, "script conversion"):
+            validate_training_data(data, before_year=1945, vocab_size=19)
+        copies[0]["split"] = "val"
+        self.write_export(copy_dir, copies, export_id=11)
+        with self.assertRaisesRegex(ValueError, "both train and val"):
+            prepare([self.export, copy_dir], self.root / "leak", self.tokenizer_path, script_conversion="none")
+        self.write_export(self.root / "export2")
+        with self.assertRaisesRegex(ValueError, "duplicate document row"):
+            prepare([self.export, self.root / "export2"], self.root / "dup", self.tokenizer_path)
 
     def test_open_date_policy_and_parallel_encoding(self):
         self.records.extend([self.record(8, "test", None, 1950, None, "庚"),

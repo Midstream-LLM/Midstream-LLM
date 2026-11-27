@@ -223,6 +223,28 @@ PYTHONPATH=src .venv-torch/bin/python -m jishui.prepare_corpus \
 根 manifest 记录模板配置、发布身份、转换配置、tokenizer 指纹及分片哈希。
 训练启动与恢复都会核验文件、词表、tokenizer 和年代条件。
 
+### v4 繁简合并（600M，2026-11-27）
+
+v4 繁简都练：A `jishui-date-open-v4`（原文）与 B `jishui-date-open-v4-t2s`（繁体书的简体副本）
+一起准备，不再转简，分词器用 `v4-bbpe-32k`。`--export-dir` 可重复给出：
+
+```bash
+PYTHONPATH=src .venv-torch/bin/python -m jishui.prepare_corpus \
+  --export-dir "$A_EXPORT_DIR" --export-dir "$B_EXPORT_DIR" \
+  --output-dir dataset/corpus-date-open-v4 \
+  --tokenizer tokenizer/v4-bbpe-32k \
+  --before-year 1945 --date-policy exclude_known_late \
+  --script-conversion none --workers 8
+```
+
+- 行以 (version_id, segment) 识别：span 裁剪导出一篇可有多行，B 的简体副本是同一 doc_id 的另一版本。
+  同一 (version_id, segment) 出现两次即报错。
+- 同一 doc_id 在所有导出里必须落在同一 split，否则报错（防止繁体本在 val、简体副本在 train 的泄漏）。
+- 各导出模板须一致；根 manifest 的 `source_exports` 列出每份导出的身份与配方，
+  `source_export_manifests.json` 存原 manifest；`script_conversion` 记为 `{"config": "none"}`。
+- 训练配置 `data.script_conversion` 须与数据一致（默认 `t2s`，v4 写 `"none"`），启动与恢复时核验。
+- 2026-11-27 在 Mac 上全量生成 `dataset/corpus-date-open-v4`（8 进程 29.5 分钟，峰值内存 2.3 GB）：6,189,309 行、3,510,204,257 tokens，其中 train 3,500,953,270；无排除；9.5 GB（tokens 6.5 GB、索引 2.9 GB）。`validate_training_data` 按 600M v4 配置通过。传输包在 `dataset/deliveries/jishui-600m-v4-20261127/`。
+
 ## 3. 新训练与恢复
 
 `configs/jishui-200m-corpus-pre1945.json` 保留旧 200M 模型结构与 32k tokenizer。

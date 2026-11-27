@@ -1,7 +1,10 @@
-"""Convert a frozen Midstream text export into dated, templated NPY training data.
+"""Convert frozen Midstream text exports into dated, templated NPY training data.
 
 The export's text already contains its template. Encode that exact rendered text
-after the recorded script conversion; never re-read untemplated database bodies.
+after the recorded script conversion (t2s, or none to keep each row's own script);
+never re-read untemplated database bodies. Several exports (e.g. an original-script
+release and its simplified copy) can be combined: rows are identified by
+(version_id, segment), and every doc_id must keep one split across all exports.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ import numpy as np
 FORMAT = "jishui-midstream-v1"
 REQUIRED_FIELDS = {"doc_id", "version_id", "split", "text", "source", "category", "composed_years"}
 DATE_POLICIES = ("strict_upper", "exclude_known_late")
+SCRIPT_CONVERSIONS = ("t2s", "none")
 
 
 def sha256(path):
@@ -66,18 +70,20 @@ def exclusion(record, before_year, policy):
     return None
 
 
-def _encoder(tokenizer_bytes):
-    from opencc import OpenCC
+def _encoder(tokenizer_bytes, script_conversion):
     from tokenizers import Tokenizer
     backend = Tokenizer.from_str(tokenizer_bytes.decode("utf-8"))
     backend.no_padding()
     backend.no_truncation()
-    return OpenCC("t2s"), backend
+    if script_conversion == "none":
+        return None, backend
+    from opencc import OpenCC
+    return OpenCC(script_conversion), backend
 
 
-def _init_worker(tokenizer_bytes):
+def _init_worker(tokenizer_bytes, script_conversion):
     global _worker_encoder
-    _worker_encoder = _encoder(tokenizer_bytes)
+    _worker_encoder = _encoder(tokenizer_bytes, script_conversion)
 
 
 def _encode_rows(rows, before_year, policy, dtype, encoder=None):
@@ -90,7 +96,8 @@ def _encode_rows(rows, before_year, policy, dtype, encoder=None):
             raise ValueError("export text must be a string")
         ids, digest = (), None
         if reason is None:
-            text = converter.convert(text)
+            if converter is not None:
+                text = converter.convert(text)
             ids = np.asarray(backend.encode(text, add_special_tokens=False).ids, dtype=dtype)
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             if not len(ids):
@@ -180,21 +187,10 @@ class TokenWriter:
         return shard, offset
 
 
-def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_tokens=200_000_000,
-            date_policy="strict_upper", workers=1):
-    if date_policy not in DATE_POLICIES or workers < 1:
-        raise ValueError("invalid date policy or worker count")
-    fields = REQUIRED_FIELDS | ({"tags"} if date_policy == "exclude_known_late" else set())
-
-    export_dir, output_dir, tokenizer_path = map(Path, (export_dir, output_dir, tokenizer_path))
-    if tokenizer_path.is_dir():
-        tokenizer_path /= "tokenizer.json"
-    if output_dir.exists():
-        raise FileExistsError(f"use a new output directory: {output_dir}")
-    if type(before_year) is not int or before_year <= 0 or shard_tokens < 1:
-        raise ValueError("before_year and shard_tokens must be positive integers")
+def _load_export(export_dir, fields):
+    """Validate one export completely before any data is generated."""
     manifest_path = export_dir / "manifest.json"
-    source_digest = sha256(manifest_path)
+    digest = sha256(manifest_path)
     source = json.loads(manifest_path.read_text(encoding="utf-8"))
     if source.get("format") not in {"jsonl", "parquet"} or source.get("compression"):
         raise ValueError("export uncompressed JSONL or Parquet (not the raw-body tokens export)")
@@ -205,7 +201,7 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
     files = source.get("files", [])
     if not files:
         raise ValueError("empty export")
-    # Validate the whole input before generating data. Only manifest-listed files count.
+    # Only manifest-listed files count.
     paths = []
     for item in files:
         path = (export_dir / item["file"]).resolve()
@@ -214,11 +210,37 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
         if path.stat().st_size != item["bytes"] or sha256(path) != item["sha256"]:
             raise ValueError(f"export checksum mismatch: {item['file']}")
         paths.append(path)
+    return {"manifest_path": manifest_path, "digest": digest, "source": source, "files": files, "paths": paths}
+
+
+def prepare(export_dirs, output_dir, tokenizer_path, *, before_year=1945, shard_tokens=200_000_000,
+            date_policy="strict_upper", workers=1, script_conversion="t2s"):
+    if date_policy not in DATE_POLICIES or workers < 1:
+        raise ValueError("invalid date policy or worker count")
+    if script_conversion not in SCRIPT_CONVERSIONS:
+        raise ValueError(f"script_conversion must be one of {SCRIPT_CONVERSIONS}")
+    fields = REQUIRED_FIELDS | ({"tags"} if date_policy == "exclude_known_late" else set())
+
+    if isinstance(export_dirs, (str, Path)):
+        export_dirs = [export_dirs]
+    export_dirs = [Path(d) for d in export_dirs]
+    output_dir, tokenizer_path = Path(output_dir), Path(tokenizer_path)
+    if tokenizer_path.is_dir():
+        tokenizer_path /= "tokenizer.json"
+    if output_dir.exists():
+        raise FileExistsError(f"use a new output directory: {output_dir}")
+    if type(before_year) is not int or before_year <= 0 or shard_tokens < 1:
+        raise ValueError("before_year and shard_tokens must be positive integers")
+    if not export_dirs or len({d.resolve() for d in export_dirs}) != len(export_dirs):
+        raise ValueError("give each export directory once")
+    exports = [_load_export(d, fields) for d in export_dirs]
+    if len({json.dumps(e["source"].get("template"), sort_keys=True) for e in exports}) != 1:
+        raise ValueError("combined exports must share one template")
     tokenizer_bytes = tokenizer_path.read_bytes()
     tokenizer_spec = json.loads(tokenizer_bytes)
     if tokenizer_spec.get("model", {}).get("dropout"):
         raise ValueError("stochastic tokenizer dropout is unsupported")
-    encoder = _encoder(tokenizer_bytes)
+    encoder = _encoder(tokenizer_bytes, script_conversion)
     backend = encoder[1]
     vocab_size = backend.get_vocab_size(with_added_tokens=True)
     if max(backend.get_vocab(with_added_tokens=True).values()) >= vocab_size:
@@ -229,7 +251,7 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
     writer = TokenWriter(temporary, dtype, shard_tokens)
     counts, rejected = Counter(), Counter()
     by_source, by_split = {}, {s: {"documents": 0, "tokens": 0} for s in ("train", "val", "test")}
-    seen = set()
+    seen, doc_splits = set(), {}
     try:
         (temporary / "manifest").mkdir()
         (temporary / "reports").mkdir()
@@ -238,18 +260,23 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
             docs = stack.enter_context(docs_path.open("w", encoding="utf-8"))
             excluded = stack.enter_context((temporary / "reports/excluded.jsonl").open("w", encoding="utf-8"))
             pool = stack.enter_context(ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"), initializer=_init_worker,
-                       initargs=(tokenizer_bytes,))) if workers > 1 else None
-            for item, path in zip(files, paths):
+                       initargs=(tokenizer_bytes, script_conversion))) if workers > 1 else None
+            for export, item, path in ((e, i, p) for e in exports for i, p in zip(e["files"], e["paths"])):
                 rows = 0
-                batches = _batches(read_rows(path, source["format"]), fields)
+                batches = _batches(read_rows(path, export["source"]["format"]), fields)
                 for record, reason, ids, text_digest in _encoded(batches, pool, workers, (before_year, date_policy, dtype), encoder):
                     rows += 1
                     doc_id, split = record["doc_id"], record["split"]
-                    if doc_id in seen:
-                        raise ValueError(f"duplicate document in export: {doc_id}")
-                    seen.add(doc_id)
+                    # Span-cut exports emit several rows per version; a simplified copy is
+                    # its own version of the same doc_id.
+                    key = (record["version_id"], record.get("segment"))
+                    if key in seen:
+                        raise ValueError(f"duplicate document row in exports: version {key[0]} segment {key[1]}")
+                    seen.add(key)
                     if split not in by_split or split != item["split"]:
                         raise ValueError("record split differs from frozen export")
+                    if doc_splits.setdefault(doc_id, split) != split:
+                        raise ValueError(f"document {doc_id} has rows in both {doc_splits[doc_id]} and {split}")
                     if not isinstance(record["source"], str) or not record["source"]:
                         raise ValueError("export source must be a nonempty string")
                     counts["input_documents"] += 1
@@ -259,7 +286,7 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
                         rejected[reason] += 1
                         source_counts[reason] += 1
                         excluded.write(json.dumps({"doc_id": doc_id, "version_id": record["version_id"],
-                            "split": split, "source": record["source"], "composed_years": record["composed_years"],
+                            "segment": record.get("segment"), "split": split, "source": record["source"], "composed_years": record["composed_years"],
                             "reason": reason}, ensure_ascii=False) + "\n")
                         continue
                     shard, offset = writer.write(ids)
@@ -280,24 +307,29 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
         writer.close_shard()
         if not by_split["train"]["documents"] or not by_split["val"]["documents"]:
             raise ValueError("date filtering must leave both training and validation documents")
-        if sha256(manifest_path) != source_digest:
+        if any(sha256(e["manifest_path"]) != e["digest"] for e in exports):
             raise ValueError("export manifest changed during preparation")
+        if script_conversion == "none":
+            conversion = {"config": "none"}
+        else:
+            conversion = {"config": script_conversion, "package": "opencc-python-reimplemented",
+                          "version": importlib.metadata.version("opencc-python-reimplemented")}
         output = {"format": FORMAT, "before_year": before_year, "date_policy": date_policy,
             "unknown_years": "exclude" if date_policy == "strict_upper" else "include",
             "category_mode": "labels", "vocab_size": vocab_size, "dtype": dtype.str,
             "tokenizer_sha256": hashlib.sha256(tokenizer_bytes).hexdigest(),
             "add_special_tokens": False, "padding": False, "truncation": False,
-            "script_conversion": {"config": "t2s", "package": "opencc-python-reimplemented",
-                                  "version": importlib.metadata.version("opencc-python-reimplemented")},
-            "template": source.get("template"), "template_applied_by": "midstream-text-export",
-            "source_export": {"manifest_sha256": source_digest, "release_id": source["release_id"],
-                              "export_id": source["export_id"], "content_digest": source["content_digest"]},
-            "recipe": source["recipe"], **counts, "by_split": by_split,
+            "script_conversion": conversion, "row_key": ["version_id", "segment"],
+            "template": exports[0]["source"].get("template"), "template_applied_by": "midstream-text-export",
+            "source_exports": [{"manifest_sha256": e["digest"], "release_id": e["source"]["release_id"],
+                                "export_id": e["source"]["export_id"], "content_digest": e["source"]["content_digest"],
+                                "recipe": e["source"]["recipe"]} for e in exports], **counts, "by_split": by_split,
             "excluded": dict(rejected), "by_source": by_source, "files": writer.files}
         output["files"].append({"file": "manifest/docs_tokens.jsonl", "sha256": sha256(docs_path),
                                 "bytes": docs_path.stat().st_size})
         (temporary / "manifest.json").write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        (temporary / "source_export_manifest.json").write_text(json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (temporary / "source_export_manifests.json").write_text(
+            json.dumps([e["source"] for e in exports], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.rename(output_dir)
         return output
     except BaseException:
@@ -307,7 +339,8 @@ def prepare(export_dir, output_dir, tokenizer_path, *, before_year=1945, shard_t
         raise
 
 
-def validate_training_data(data_dir, *, before_year, vocab_size, tokenizer_sha256=None, date_policy="strict_upper"):
+def validate_training_data(data_dir, *, before_year, vocab_size, tokenizer_sha256=None, date_policy="strict_upper",
+                           script_conversion="t2s"):
     """Run before model allocation, including every resume of the new trainer."""
     root = Path(data_dir)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -319,8 +352,8 @@ def validate_training_data(data_dir, *, before_year, vocab_size, tokenizer_sha25
         raise ValueError("dataset vocabulary differs from model")
     if tokenizer_sha256 and manifest.get("tokenizer_sha256") != tokenizer_sha256:
         raise ValueError("dataset tokenizer fingerprint differs from configuration")
-    if manifest.get("script_conversion", {}).get("config") != "t2s":
-        raise ValueError("this run requires simplified training text")
+    if manifest.get("script_conversion", {}).get("config") != script_conversion:
+        raise ValueError(f"training data script conversion differs from configuration ({script_conversion})")
     for item in manifest["files"]:
         path = (root / item["file"]).resolve()
         if not path.is_relative_to(root.resolve()) or path.stat().st_size != item["bytes"] or sha256(path) != item["sha256"]:
@@ -335,17 +368,20 @@ def validate_training_data(data_dir, *, before_year, vocab_size, tokenizer_sha25
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--export-dir", type=Path, required=True)
+    parser.add_argument("--export-dir", type=Path, action="append", required=True,
+                        help="repeat to combine exports, e.g. an original-script release and its t2s copy")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--before-year", type=int, default=1945)
     parser.add_argument("--date-policy", choices=DATE_POLICIES, default="strict_upper")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--script-conversion", choices=SCRIPT_CONVERSIONS, default="t2s")
     parser.add_argument("--shard-tokens", type=int, default=200_000_000)
     args = parser.parse_args()
     result = prepare(args.export_dir, args.output_dir, args.tokenizer,
                      before_year=args.before_year, shard_tokens=args.shard_tokens,
-                     date_policy=args.date_policy, workers=args.workers)
+                     date_policy=args.date_policy, workers=args.workers,
+                     script_conversion=args.script_conversion)
     print(json.dumps({k: result[k] for k in ("documents", "tokens", "by_split", "excluded")}, ensure_ascii=False, indent=2))
 
 

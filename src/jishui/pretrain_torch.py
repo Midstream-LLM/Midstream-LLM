@@ -269,7 +269,8 @@ def run(args, tracker):
         validate_training_data(args.data_dir, before_year=data_policy["before_year"],
                                vocab_size=model_config.vocab_size,
                                tokenizer_sha256=data_policy.get("tokenizer_sha256"),
-                               date_policy=data_policy.get("date_policy", "strict_upper"))
+                               date_policy=data_policy.get("date_policy", "strict_upper"),
+                               script_conversion=data_policy.get("script_conversion", "t2s"))
     # All ranks have validated the run directory; only now may rank 0 write.
     barrier()
     torch.manual_seed(config.seed)
